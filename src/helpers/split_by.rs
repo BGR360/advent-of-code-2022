@@ -164,7 +164,7 @@ mod tests {
             .map(|chars| chars.collect())
             .collect();
 
-        assert_eq!(expected, actual);
+        assert_eq!(actual, expected);
     }
 
     #[test]

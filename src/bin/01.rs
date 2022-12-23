@@ -18,7 +18,8 @@ impl Elf {
     }
 }
 
-/// Returns the total calories carried by the elf with the highest
+/// Returns the total calories carried by the elf with the highest sum of
+/// calories in their snacks.
 pub fn part_one(input: &str) -> Option<u32> {
     let line_groups = input.lines().split_by(|line| line.is_empty());
     (&line_groups)
@@ -28,8 +29,13 @@ pub fn part_one(input: &str) -> Option<u32> {
         .map(|elf| elf.total_calories)
 }
 
+/// Returns the total calories carried by the three elves with the highest sum
+/// of calories in their snacks.
 pub fn part_two(input: &str) -> Option<u32> {
-    None
+    let line_groups = input.lines().split_by(|line| line.is_empty());
+    let max_elves = (&line_groups).into_iter().map(Elf::from_lines).max_n(3);
+
+    Some(max_elves.into_iter().map(|elf| elf.total_calories).sum())
 }
 
 fn main() {
@@ -51,6 +57,6 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 1);
-        assert_eq!(part_two(&input), None);
+        assert_eq!(part_two(&input), Some(45000));
     }
 }
