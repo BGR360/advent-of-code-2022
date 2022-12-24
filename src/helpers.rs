@@ -11,17 +11,17 @@ pub use split_by::{SplitBy, SplitGroup, SplitGroups};
 
 #[macro_export]
 macro_rules! debug {
-    ($tt:tt) => {
+    ($($args:expr),*) => {
         #[cfg(debug_assertions)]
-        print!($tt)
+        print!($($args),*)
     };
 }
 
 #[macro_export]
 macro_rules! debugln {
-    ($tt:tt) => {
+    ($($args:expr),*) => {
         #[cfg(debug_assertions)]
-        println!($tt)
+        println!($($args),*)
     };
 }
 
