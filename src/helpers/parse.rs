@@ -29,3 +29,12 @@ where
         combine::parser::char::digit(),
     ))
 }
+
+pub fn line<Input, P>(parser: P) -> impl Parser<Input, Output = P::Output>
+where
+    P: Parser<Input>,
+    Input: Stream<Token = char>,
+    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
+{
+    (parser, combine::parser::char::newline()).map(|(output, _newline)| output)
+}

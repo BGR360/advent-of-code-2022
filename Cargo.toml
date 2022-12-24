@@ -10,4 +10,5 @@ publish = false
 [dependencies]
 combine = "4.6.6"
 itertools = "0.10.5"
+maplit = "1.0.2"
 pico-args = "0.5.0"
