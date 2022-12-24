@@ -1,11 +1,6 @@
 use itertools::Itertools;
 
-macro_rules! dbg {
-    ($tt:tt) => {
-        #[cfg(debug_assertions)]
-        println!($tt)
-    };
-}
+use crate::debugln;
 
 pub(super) struct MaxN<T> {
     n: usize,
@@ -39,12 +34,12 @@ where
 
         if insert_index >= self.n {
             /* do nothing, we're full and element is too small */
-            dbg!("Do nothing, we're full and element is too small");
+            debugln!("Do nothing, we're full and element is too small");
         } else if len < self.n {
-            dbg!("Insert at index {insert_index}");
+            debugln!("Insert at index {insert_index}");
             self.max_n.insert(insert_index, elt);
         } else {
-            dbg!("Replace/shift at index {insert_index}");
+            debugln!("Replace/shift at index {insert_index}");
             let subslice = &mut self.max_n[insert_index..len];
             subslice.rotate_right(1);
             subslice[0] = elt;

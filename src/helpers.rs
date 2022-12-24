@@ -9,6 +9,22 @@ mod split_by;
 use max_n::MaxN;
 pub use split_by::{SplitBy, SplitGroup, SplitGroups};
 
+#[macro_export]
+macro_rules! debug {
+    ($tt:tt) => {
+        #[cfg(debug_assertions)]
+        print!($tt)
+    };
+}
+
+#[macro_export]
+macro_rules! debugln {
+    ($tt:tt) => {
+        #[cfg(debug_assertions)]
+        println!($tt)
+    };
+}
+
 pub trait Itertools: Iterator {
     /// Return an *iterable* that splits iterator elements into groups,
     /// separated by elements that satisfy a predicate.
