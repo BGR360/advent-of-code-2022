@@ -22,31 +22,49 @@ struct Round {
 }
 
 impl Choice {
-    pub fn against(&self, other: Self) -> Round {
-        let outcome = match (self, other) {
-            (Choice::Rock, Choice::Rock)
-            | (Choice::Paper, Choice::Paper)
-            | (Choice::Scissors, Choice::Scissors) => Outcome::Draw,
+    pub fn for_outcome(outcome: Outcome, their_choice: Choice) -> Choice {
+        for my_choice in [Choice::Rock, Choice::Paper, Choice::Scissors] {
+            if Outcome::for_choices(my_choice, their_choice) == outcome {
+                return my_choice;
+            }
+        }
+        unreachable!();
+    }
 
+    pub fn beats(self, other: Choice) -> bool {
+        matches!(
+            (self, other),
             (Choice::Rock, Choice::Scissors)
-            | (Choice::Paper, Choice::Rock)
-            | (Choice::Scissors, Choice::Paper) => Outcome::Win,
+                | (Choice::Paper, Choice::Rock)
+                | (Choice::Scissors, Choice::Paper)
+        )
+    }
+}
 
-            (Choice::Rock, Choice::Paper)
-            | (Choice::Paper, Choice::Scissors)
-            | (Choice::Scissors, Choice::Rock) => Outcome::Loss,
-        };
-
-        debugln!("{self:?} vs. {other:?} = {outcome:?}");
-
-        Round {
-            choice: *self,
-            outcome,
+impl Outcome {
+    pub fn for_choices(my_choice: Choice, their_choice: Choice) -> Outcome {
+        if my_choice.beats(their_choice) {
+            Outcome::Win
+        } else if their_choice.beats(my_choice) {
+            Outcome::Loss
+        } else {
+            Outcome::Draw
         }
     }
 }
 
 impl Round {
+    pub fn new(my_choice: Choice, their_choice: Choice) -> Self {
+        let outcome = Outcome::for_choices(my_choice, their_choice);
+
+        debugln!("{my_choice:?} vs. {their_choice:?} = {outcome:?}");
+
+        Self {
+            choice: my_choice,
+            outcome,
+        }
+    }
+
     pub fn score(&self) -> u32 {
         let choice = self.choice;
         let outcome = self.outcome;
@@ -72,8 +90,6 @@ impl Round {
 mod parse {
     use super::*;
 
-    use std::str::FromStr;
-
     use combine as c;
 
     use c::{EasyParser, ParseError, Parser, Stream};
@@ -81,7 +97,7 @@ mod parse {
     type EzParseError = c::easy::Errors<char, String, c::stream::PointerOffset<str>>;
     type Result<T> = std::result::Result<T, EzParseError>;
 
-    fn from_str<'a, P>(s: &'a str, parser: P) -> Result<P::Output>
+    pub fn from_str<'a, P>(s: &'a str, parser: P) -> Result<P::Output>
     where
         P: Parser<c::easy::Stream<&'a str>>,
     {
@@ -109,30 +125,41 @@ mod parse {
         }
     }
 
-    impl FromStr for Choice {
-        type Err = EzParseError;
-
-        fn from_str(s: &str) -> Result<Self> {
-            from_str(s, Self::parser())
-        }
-    }
-
-    impl Round {
+    impl Outcome {
         pub fn parser<Input>() -> impl Parser<Input, Output = Self>
         where
             Input: Stream<Token = char>,
             Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
         {
-            (Choice::parser(), c::token(' '), Choice::parser())
-                .map(|(their_choice, _, my_choice)| my_choice.against(their_choice))
+            c::choice((
+                c::token('X').map(|_| Self::Loss),
+                c::token('Y').map(|_| Self::Draw),
+                c::token('Z').map(|_| Self::Win),
+            ))
         }
     }
 
-    impl FromStr for Round {
-        type Err = EzParseError;
+    impl Round {
+        pub fn part_one_parser<Input>() -> impl Parser<Input, Output = Self>
+        where
+            Input: Stream<Token = char>,
+            Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
+        {
+            (Choice::parser(), c::token(' '), Choice::parser())
+                .map(|(their_choice, _, my_choice)| Self::new(my_choice, their_choice))
+        }
 
-        fn from_str(s: &str) -> Result<Self> {
-            from_str(s, Self::parser())
+        pub fn part_two_parser<Input>() -> impl Parser<Input, Output = Self>
+        where
+            Input: Stream<Token = char>,
+            Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
+        {
+            (Choice::parser(), c::token(' '), Outcome::parser()).map(
+                |(their_choice, _, desired_outcome)| {
+                    let my_choice = Choice::for_outcome(desired_outcome, their_choice);
+                    Self::new(my_choice, their_choice)
+                },
+            )
         }
     }
 }
@@ -142,7 +169,8 @@ pub fn part_one(input: &str) -> Option<u32> {
         .lines()
         .map(|line| {
             debugln!("{line}:");
-            let round = line.parse::<Round>().expect("input should be valid");
+            let round =
+                parse::from_str(line, Round::part_one_parser()).expect("input should be valid");
             round.score()
         })
         .sum();
@@ -150,7 +178,16 @@ pub fn part_one(input: &str) -> Option<u32> {
 }
 
 pub fn part_two(input: &str) -> Option<u32> {
-    None
+    let score = input
+        .lines()
+        .map(|line| {
+            debugln!("{line}:");
+            let round =
+                parse::from_str(line, Round::part_two_parser()).expect("input should be valid");
+            round.score()
+        })
+        .sum();
+    Some(score)
 }
 
 fn main() {
@@ -172,6 +209,6 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 2);
-        assert_eq!(part_two(&input), None);
+        assert_eq!(part_two(&input), Some(12));
     }
 }
