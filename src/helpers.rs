@@ -7,6 +7,8 @@ mod max_n;
 pub mod parse;
 mod split_by;
 
+use std::cmp::{max, min};
+
 use max_n::MaxN;
 pub use split_by::{SplitBy, SplitGroup, SplitGroups};
 
@@ -102,3 +104,26 @@ pub trait Itertools: Iterator {
 }
 
 impl<I: Iterator> Itertools for I {}
+
+/// Returns mutable references to two elements in a slice.
+///
+/// Courtesy of @H2CO3 on URLO:
+/// https://users.rust-lang.org/t/get-mutable-references-to-two-elements-of-a-slice-by-transmuting-them/71941/2
+pub fn slice_pair_mut<T>(slice: &mut [T], i: usize, j: usize) -> Option<(&mut T, &mut T)> {
+    let (first, second) = (min(i, j), max(i, j));
+
+    if i == j || second >= slice.len() {
+        return None;
+    }
+
+    let (_, tmp) = slice.split_at_mut(first);
+    let (x, rest) = tmp.split_at_mut(1);
+    let (_, y) = rest.split_at_mut(second - first - 1);
+    let pair = if i < j {
+        (&mut x[0], &mut y[0])
+    } else {
+        (&mut y[0], &mut x[0])
+    };
+
+    Some(pair)
+}

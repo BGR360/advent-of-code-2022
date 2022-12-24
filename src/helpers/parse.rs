@@ -1,4 +1,6 @@
-use combine::{easy, EasyParser, Parser};
+use std::str::FromStr;
+
+use combine::{easy, EasyParser, ParseError, Parser, Stream};
 
 pub type EzParseError<'a> = easy::ParseError<&'a str>;
 pub type Result<'a, T> = std::result::Result<T, EzParseError<'a>>;
@@ -14,4 +16,16 @@ where
             debug_assert_eq!(rest, "");
             output
         })
+}
+
+pub fn decimal_integer<T, Input>() -> impl Parser<Input, Output = T>
+where
+    Input: Stream<Token = char>,
+    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
+    T: FromStr,
+    <T as FromStr>::Err: std::fmt::Display,
+{
+    combine::from_str(combine::many1::<String, _, _>(
+        combine::parser::char::digit(),
+    ))
 }
