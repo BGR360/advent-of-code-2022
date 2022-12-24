@@ -37,36 +37,26 @@ impl From<File> for Entry {
 }
 
 impl Dir {
-    pub fn total_size_of_dirs_not_exceeding(&self, max_size: u64) -> u64 {
-        struct Counts {
-            total: u64,
-            this_dir: u64,
-        }
-
-        fn inner(this: &Dir, max_size: u64) -> Counts {
+    /// Returns a mapping from directory name to total size for this directory
+    /// and all its descendants.
+    pub fn total_sizes(&self) -> BTreeMap<&'_ str, u64> {
+        fn inner<'a>(name: &'a str, dir: &'a Dir, totals: &mut BTreeMap<&'a str, u64>) {
             let mut total = 0;
-            let mut this_dir = 0;
-            for entry in this.entries.values() {
+            for (subdir_name, entry) in dir.entries.iter() {
                 match entry {
-                    Entry::File(File { size }) => this_dir += size,
-                    Entry::Dir(dir) => {
-                        let subdir_counts = inner(dir, max_size);
-                        total += subdir_counts.total;
-                        this_dir += subdir_counts.this_dir;
+                    Entry::File(File { size }) => total += size,
+                    Entry::Dir(subdir) => {
+                        inner(subdir_name, subdir, totals);
+                        total += totals[subdir_name.as_str()];
                     }
                 }
             }
-
-            if this_dir <= max_size {
-                total += this_dir
-            }
-
-            Counts { total, this_dir }
+            totals.insert(name, total);
         }
 
-        let Counts { total, .. } = inner(self, max_size);
-
-        total
+        let mut totals = BTreeMap::new();
+        inner("/", self, &mut totals);
+        totals
     }
 
     pub fn from_input(input: &str) -> Self {
@@ -159,11 +149,47 @@ impl<'a> Iterator for Commands<'a> {
 
 pub fn part_one(input: &str) -> Option<u64> {
     let root = Dir::from_input(input);
-    Some(root.total_size_of_dirs_not_exceeding(PART_ONE_MAX_SIZE))
+    let dir_total_sizes = root.total_sizes();
+
+    let mut total_size_of_dirs_not_exceeding_max = 0;
+    for dir_size in dir_total_sizes.values() {
+        if *dir_size <= PART_ONE_MAX_SIZE {
+            total_size_of_dirs_not_exceeding_max += dir_size;
+        }
+    }
+
+    Some(total_size_of_dirs_not_exceeding_max)
 }
 
-pub fn part_two(input: &str) -> Option<u32> {
-    None
+pub fn part_two(input: &str) -> Option<u64> {
+    const TOTAL_DISK_SPACE: u64 = 70_000_000;
+    const REQUIRED_SPACE: u64 = 30_000_000;
+
+    let root = Dir::from_input(input);
+    let dir_total_sizes = root.total_sizes();
+    debugln!("dir_total_sizes: {dir_total_sizes:#?}");
+
+    // Get the total size of the whole file system.
+    let fs_total_size: u64 = dir_total_sizes["/"];
+    debugln!("fs_total_size: {fs_total_size}");
+
+    // Calculate how much space we need to free.
+    let current_free_space = TOTAL_DISK_SPACE.checked_sub(fs_total_size).unwrap();
+    debugln!("current_free_space: {current_free_space}");
+    let need_to_delete = REQUIRED_SPACE.checked_sub(current_free_space).unwrap();
+    debugln!("need_to_delete: {need_to_delete}");
+
+    // Sort the directories in increasing order by total size.
+    let mut sorted_dirs: Vec<u64> = dir_total_sizes.into_values().collect();
+    sorted_dirs.sort_unstable();
+
+    // Find the first index that isn't smaller than need_to_delete.
+    let index = sorted_dirs.partition_point(|&size| size < need_to_delete);
+
+    // This is our dir!
+    let size_to_delete = sorted_dirs[index];
+
+    Some(size_to_delete)
 }
 
 fn main() {
@@ -185,7 +211,7 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 7);
-        assert_eq!(part_two(&input), None);
+        assert_eq!(part_two(&input), Some(24933642));
     }
 }
 
@@ -307,65 +333,6 @@ impl<'a> fmt::Display for DirPrettyPrinter<'a> {
 #[cfg(test)]
 mod manual_tests {
     use super::*;
-
-    macro_rules! dir {
-        ($($name:literal => $entry:expr),*) => {
-            Entry::Dir(Dir {
-                entries: maplit::btreemap! {
-                    $($name.into() => $entry),*
-                }
-            })
-        };
-    }
-
-    macro_rules! file {
-        ($size:expr) => {
-            Entry::File(File { size: $size })
-        };
-    }
-
-    #[test]
-    fn test_part_one_manual() {
-        // - / (dir)
-        //   - a (dir)
-        //     - e (dir)
-        //       - i (file, size=584)
-        //     - f (file, size=29116)
-        //     - g (file, size=2557)
-        //     - h.lst (file, size=62596)
-        //   - b.txt (file, size=14848514)
-        //   - c.dat (file, size=8504156)
-        //   - d (dir)
-        //     - j (file, size=4060174)
-        //     - d.log (file, size=8033020)
-        //     - d.ext (file, size=5626152)
-        //     - k (file, size=7214296)
-        let Entry::Dir(root) = dir! {
-            "a" => dir! {
-                "e" => dir! {
-                    "i" => file!(584)
-                },
-                "f" => file!(29116),
-                "g" => file!(2557),
-                "h.lst" => file!(62596)
-            },
-            "b.txt" => file!(14848514),
-            "c.dat" => file!(8504156),
-            "d" => dir! {
-                "j" => file!(4060174),
-                "d.log" => file!(8033020),
-                "d.ext" => file!(5626152),
-                "k" => file!(7214296)
-            }
-        } else {
-            unreachable!()
-        };
-
-        assert_eq!(
-            root.total_size_of_dirs_not_exceeding(PART_ONE_MAX_SIZE),
-            95437
-        );
-    }
 
     #[test]
     fn test_commands_manual() {
