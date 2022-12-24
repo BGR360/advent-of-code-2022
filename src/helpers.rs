@@ -4,6 +4,7 @@
  */
 
 mod max_n;
+pub mod parse;
 mod split_by;
 
 use max_n::MaxN;
@@ -11,18 +12,18 @@ pub use split_by::{SplitBy, SplitGroup, SplitGroups};
 
 #[macro_export]
 macro_rules! debug {
-    ($($args:expr),*) => {
+    ($($args:expr),*) => {{
         #[cfg(debug_assertions)]
-        print!($($args),*)
-    };
+        print!($($args),*);
+    }};
 }
 
 #[macro_export]
 macro_rules! debugln {
-    ($($args:expr),*) => {
+    ($($args:expr),*) => {{
         #[cfg(debug_assertions)]
-        println!($($args),*)
-    };
+        println!($($args),*);
+    }};
 }
 
 pub trait Itertools: Iterator {

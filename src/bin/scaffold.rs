@@ -8,7 +8,9 @@ use std::{
     process,
 };
 
-const MODULE_TEMPLATE: &str = r###"pub fn part_one(input: &str) -> Option<u32> {
+const MODULE_TEMPLATE: &str = r###"#![doc = include_str!("../puzzles/DAY_PADDED.md")]
+
+pub fn part_one(input: &str) -> Option<u32> {
     None
 }
 
@@ -76,7 +78,10 @@ fn main() {
         }
     };
 
-    match file.write_all(MODULE_TEMPLATE.replace("DAY", &day.to_string()).as_bytes()) {
+    let contents = MODULE_TEMPLATE.replace("DAY_PADDED", &day_padded);
+    let contents = contents.replace("DAY", &day.to_string());
+
+    match file.write_all(contents.as_bytes()) {
         Ok(_) => {
             println!("Created module file \"{}\"", &module_path);
         }

@@ -1,6 +1,6 @@
 #![doc = include_str!("../puzzles/02.md")]
 
-use advent_of_code::debugln;
+use advent_of_code::{debugln, helpers::parse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Choice {
@@ -87,29 +87,12 @@ impl Round {
     }
 }
 
-mod parse {
+mod parsing {
     use super::*;
 
     use combine as c;
 
-    use c::{EasyParser, ParseError, Parser, Stream};
-
-    type EzParseError = c::easy::Errors<char, String, c::stream::PointerOffset<str>>;
-    type Result<T> = std::result::Result<T, EzParseError>;
-
-    pub fn from_str<'a, P>(s: &'a str, parser: P) -> Result<P::Output>
-    where
-        P: Parser<c::easy::Stream<&'a str>>,
-    {
-        (parser, c::eof())
-            .map(|(output, _)| output)
-            .easy_parse(s)
-            .map(|(output, rest)| {
-                debug_assert_eq!(rest, "");
-                output
-            })
-            .map_err(|err| err.map_range(|s| s.to_owned()))
-    }
+    use c::{ParseError, Parser, Stream};
 
     impl Choice {
         pub fn parser<Input>() -> impl Parser<Input, Output = Self>
