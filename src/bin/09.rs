@@ -1,10 +1,10 @@
 #![doc = include_str!("../puzzles/09.md")]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Display};
 
 use glam::IVec2;
 
-use advent_of_code::helpers::parse;
+use advent_of_code::{debugln, helpers::parse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -33,30 +33,81 @@ struct Motion {
 
 #[derive(Debug)]
 struct World {
-    head: IVec2,
-    tail: IVec2,
+    /// The position of each knot in the world. The head knot is at index 0.
+    knots: Vec<IVec2>,
+    /// The set of all positions that the tail knot has visited.
     tail_visited: HashSet<IVec2>,
+    /// The negative-most position that any knot has visited.
     lower_bound: IVec2,
+    /// The positive-most position that any knot has visited.
     upper_bound: IVec2,
 }
 
 impl World {
-    pub fn new() -> Self {
+    pub fn new(num_knots: usize) -> Self {
         const ZERO: IVec2 = IVec2::ZERO;
 
         let mut tail_visited = HashSet::new();
         tail_visited.insert(ZERO);
 
         Self {
-            head: ZERO,
-            tail: ZERO,
+            knots: vec![ZERO; num_knots],
             tail_visited,
             lower_bound: ZERO,
             upper_bound: ZERO,
         }
     }
 
-    #[inline]
+    /// Returns an object that implements [`Display`] for pretty-printing the
+    /// rope like so:
+    ///
+    /// ```txt
+    /// ......
+    /// ...2..
+    /// .H13..
+    /// .5....
+    /// 6.....
+    /// ```
+    pub fn display_rope(&self) -> formatting::RopePrinter<'_> {
+        formatting::RopePrinter::new(self)
+    }
+
+    /// Returns an object that implements [`Display`] for pretty-printing the
+    /// positions that the tail knot visited, like so:
+    ///
+    /// ```txt
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// ..........................
+    /// #.........................
+    /// #.............###.........
+    /// #............#...#........
+    /// .#..........#.....#.......
+    /// ..#..........#.....#......
+    /// ...#........#.......#.....
+    /// ....#......s.........#....
+    /// .....#..............#.....
+    /// ......#............#......
+    /// .......#..........#.......
+    /// ........#........#........
+    /// .........########.........
+    /// ```
+    pub fn display_tail_path(&self) -> formatting::TailPrinter<'_> {
+        formatting::TailPrinter::new(self)
+    }
+
+    /// Sets the lower-left and upper-right positions to help with printing.
+    pub fn set_bounds(&mut self, lower_bound: IVec2, upper_bound: IVec2) {
+        self.lower_bound = lower_bound.min(upper_bound);
+        self.upper_bound = upper_bound.max(lower_bound);
+    }
+
     pub fn do_motion(&mut self, motion: Motion) {
         for _ in 0..motion.distance {
             self.move_head_one(motion.direction);
@@ -65,20 +116,25 @@ impl World {
 
     #[inline]
     pub fn move_head_one(&mut self, dir: Direction) {
-        let new_pos = self.head + IVec2::from(dir);
-        self.move_head_to(new_pos);
+        let new_pos = self.knots[0] + IVec2::from(dir);
+        self.move_knot_to(0, new_pos);
 
-        if !self.tail_is_touching_head() {
-            self.move_tail_one();
+        for i in 1..self.knots.len() {
+            if self.knots_are_touching(i, i - 1) {
+                break;
+            }
+            self.move_knot_towards_previous(i);
         }
 
-        debug_assert!(self.tail_is_touching_head());
+        for i in 1..self.knots.len() {
+            debug_assert!(self.knots_are_touching(i, i - 1));
+        }
     }
 
     #[inline]
-    pub fn tail_is_touching_head(&self) -> bool {
-        let tail_to_head = (self.head - self.tail).abs();
-        tail_to_head.x <= 1 && tail_to_head.y <= 1
+    pub fn knots_are_touching(&self, a: usize, b: usize) -> bool {
+        let a_to_b = (self.knots[b] - self.knots[a]).abs();
+        a_to_b.x <= 1 && a_to_b.y <= 1
     }
 
     /// Returns the number of unique positions that the tail visited.
@@ -87,23 +143,30 @@ impl World {
     }
 
     #[inline]
-    fn move_tail_one(&mut self) {
-        let tail_to_head = (self.head - self.tail).clamp(IVec2::NEG_ONE, IVec2::ONE);
-        let new_pos = self.tail + tail_to_head;
-        self.move_tail_to(new_pos);
+    fn move_knot_towards_previous(&mut self, knot: usize) {
+        let prev = knot - 1;
+        let knot_pos = self.knots[knot];
+        let prev_pos = self.knots[prev];
+
+        let knot_to_prev = prev_pos - knot_pos;
+        let movement = knot_to_prev.clamp(IVec2::NEG_ONE, IVec2::ONE);
+
+        let new_pos = self.knots[knot] + movement;
+        self.move_knot_to(knot, new_pos);
     }
 
     #[inline]
-    fn move_head_to(&mut self, new_pos: IVec2) {
-        self.head = new_pos;
+    fn move_knot_to(&mut self, knot: usize, new_pos: IVec2) {
+        self.knots[knot] = new_pos;
         self.update_bounds(new_pos);
+        if self.is_tail(knot) {
+            self.tail_visited.insert(new_pos);
+        }
     }
 
     #[inline]
-    fn move_tail_to(&mut self, new_pos: IVec2) {
-        self.tail = new_pos;
-        self.update_bounds(new_pos);
-        self.tail_visited.insert(new_pos);
+    fn is_tail(&self, knot: usize) -> bool {
+        knot == self.knots.len() - 1
     }
 
     #[inline]
@@ -113,23 +176,41 @@ impl World {
     }
 }
 
-fn motions(input: &str) -> impl Iterator<Item = Motion> + '_ {
-    input
+fn run_motions(world: &mut World, input: &str) -> usize {
+    fn print_heading(contents: impl Display) {
+        debugln!();
+        debugln!("== {contents} ==");
+        debugln!();
+    };
+
+    print_heading("Initial State");
+    debugln!("{}", world.display_rope());
+
+    let motions = input
         .lines()
-        .map(|line| parse::from_str(line, Motion::parser()).unwrap())
+        .map(|line| parse::from_str(line, Motion::parser()).unwrap());
+
+    for motion in motions {
+        world.do_motion(motion);
+
+        print_heading(motion);
+        debugln!("{}", world.display_rope());
+    }
+
+    print_heading("Visited Positions");
+    debugln!("{}", world.display_tail_path());
+
+    world.tail_visited_positions()
 }
 
 pub fn part_one(input: &str) -> Option<usize> {
-    let mut world = World::new();
-    for motion in motions(input) {
-        world.do_motion(motion);
-    }
-
-    Some(world.tail_visited_positions())
+    let mut world = World::new(2);
+    Some(run_motions(&mut world, input))
 }
 
-pub fn part_two(input: &str) -> Option<u32> {
-    None
+pub fn part_two(input: &str) -> Option<usize> {
+    let mut world = World::new(10);
+    Some(run_motions(&mut world, input))
 }
 
 fn main() {
@@ -142,16 +223,48 @@ fn main() {
 mod tests {
     use super::*;
 
+    const SMALL_BOX_LOWER_BOUND: IVec2 = IVec2::ZERO;
+    const SMALL_BOX_UPPER_BOUND: IVec2 = IVec2 { x: 5, y: 4 };
+
+    const LARGE_BOX_LOWER_BOUND: IVec2 = IVec2 { x: -11, y: -5 };
+    const LARGE_BOX_UPPER_BOUND: IVec2 = IVec2 { x: 14, y: 15 };
+
+    #[track_caller]
+    fn do_test(input: &str, knots: usize, lower_bound: IVec2, upper_bound: IVec2) -> usize {
+        let mut world = World::new(knots);
+        world.set_bounds(lower_bound, upper_bound);
+        run_motions(&mut world, input);
+        world.tail_visited_positions()
+    }
+
     #[test]
     fn test_part_one() {
         let input = advent_of_code::read_file("examples", 9);
-        assert_eq!(part_one(&input), Some(13));
+        let output = do_test(&input, 2, SMALL_BOX_LOWER_BOUND, SMALL_BOX_UPPER_BOUND);
+        assert_eq!(output, 13);
     }
 
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 9);
-        assert_eq!(part_two(&input), None);
+        let output = do_test(&input, 10, SMALL_BOX_LOWER_BOUND, SMALL_BOX_UPPER_BOUND);
+        assert_eq!(output, 1);
+    }
+
+    #[test]
+    fn test_part_two_large() {
+        let input = "\
+R 5
+U 8
+L 8
+D 3
+R 17
+D 10
+L 25
+U 20
+";
+        let output = do_test(input, 10, LARGE_BOX_LOWER_BOUND, LARGE_BOX_UPPER_BOUND);
+        assert_eq!(output, 36);
     }
 }
 
@@ -198,6 +311,111 @@ mod parsing {
                     distance,
                 },
             )
+        }
+    }
+}
+
+mod formatting {
+    use super::*;
+
+    use std::fmt::{Display, Formatter, Result};
+
+    impl Display for Direction {
+        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+            let c = match self {
+                Direction::Up => 'U',
+                Direction::Right => 'R',
+                Direction::Down => 'D',
+                Direction::Left => 'L',
+            };
+            write!(f, "{c}")
+        }
+    }
+
+    impl Display for Motion {
+        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+            write!(f, "{} {}", self.direction, self.distance)
+        }
+    }
+
+    fn fmt_world(
+        f: &mut Formatter,
+        world: &World,
+        get_char: impl Fn(IVec2) -> Option<char>,
+    ) -> Result {
+        let IVec2 { x: x_min, y: y_min } = world.lower_bound;
+        let IVec2 { x: x_max, y: y_max } = world.upper_bound;
+
+        let mut first_row = true;
+        for y in (y_min..=y_max).rev() {
+            if !first_row {
+                writeln!(f)?;
+            }
+
+            for x in x_min..=x_max {
+                let pos = IVec2 { x, y };
+
+                let char_for_pos = if let Some(c) = get_char(pos) {
+                    c
+                } else if pos == IVec2::ZERO {
+                    's'
+                } else {
+                    '.'
+                };
+
+                write!(f, "{char_for_pos}")?;
+            }
+
+            first_row = false;
+        }
+        Ok(())
+    }
+
+    pub(super) struct RopePrinter<'a> {
+        world: &'a World,
+    }
+
+    impl<'a> RopePrinter<'a> {
+        pub fn new(world: &'a World) -> Self {
+            Self { world }
+        }
+    }
+
+    impl Display for RopePrinter<'_> {
+        fn fmt(&self, f: &mut Formatter) -> Result {
+            fmt_world(f, self.world, |pos| {
+                for (i, knot_pos) in self.world.knots.iter().enumerate() {
+                    if *knot_pos == pos {
+                        return Some(match i {
+                            0 => 'H',
+                            _ => (b'0' + i as u8) as char,
+                        });
+                    }
+                }
+                None
+            })
+        }
+    }
+
+    pub(super) struct TailPrinter<'a> {
+        world: &'a World,
+    }
+
+    impl<'a> TailPrinter<'a> {
+        pub fn new(world: &'a World) -> Self {
+            Self { world }
+        }
+    }
+
+    impl Display for TailPrinter<'_> {
+        fn fmt(&self, f: &mut Formatter) -> Result {
+            fmt_world(f, self.world, |pos| {
+                if pos != IVec2::ZERO && self.world.tail_visited.contains(&pos) {
+                    Some('#')
+                } else {
+                    None
+                }
+            })
         }
     }
 }
