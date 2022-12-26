@@ -100,20 +100,45 @@ impl Cpu {
     }
 }
 
-const KEY_CYCLE_NUMBERS: [u32; 6] = [20, 60, 100, 140, 180, 220];
+#[derive(Debug)]
+struct Program<'a> {
+    cpu: Cpu,
+    instructions: std::iter::Map<std::str::Lines<'a>, fn(&str) -> Instruction>,
+}
 
-fn instructions(input: &str) -> impl Iterator<Item = Instruction> + '_ {
-    input
-        .lines()
-        .map(|line| parse::from_str(line, Instruction::parser()).unwrap())
+impl<'a> Program<'a> {
+    pub fn new(input: &'a str) -> Self {
+        Self {
+            cpu: Cpu::new(),
+            instructions: input
+                .lines()
+                .map(|line| parse::from_str(line, Instruction::parser()).unwrap()),
+        }
+    }
+
+    pub fn tick(&mut self) {
+        if self.cpu.is_busy() {
+            self.cpu.tick();
+        } else if let Some(inst) = self.instructions.next() {
+            self.cpu.tick_inst(inst);
+        } else {
+            self.cpu.tick_inst(Instruction::Noop);
+        }
+    }
+
+    pub fn cpu(&self) -> &Cpu {
+        &self.cpu
+    }
 }
 
 pub fn part_one(input: &str) -> Option<i32> {
-    let mut cpu = Cpu::new();
-    let mut instructions = instructions(input);
+    const KEY_CYCLE_NUMBERS: [u32; 6] = [20, 60, 100, 140, 180, 220];
+
+    let mut program = Program::new(input);
     let mut total_signal_strength = 0;
 
     loop {
+        let cpu = program.cpu();
         let cycle_in_progress = cpu.cycle() + 1;
         debugln!("{cycle_in_progress}: {cpu:?}");
 
@@ -122,13 +147,7 @@ pub fn part_one(input: &str) -> Option<i32> {
             total_signal_strength += signal_strength;
         }
 
-        if cpu.is_busy() {
-            cpu.tick();
-        } else if let Some(inst) = instructions.next() {
-            cpu.tick_inst(inst);
-        } else {
-            break;
-        }
+        program.tick();
 
         if cycle_in_progress >= KEY_CYCLE_NUMBERS[KEY_CYCLE_NUMBERS.len() - 1] {
             break;
@@ -138,8 +157,36 @@ pub fn part_one(input: &str) -> Option<i32> {
     Some(total_signal_strength)
 }
 
-pub fn part_two(input: &str) -> Option<u32> {
-    None
+pub fn part_two(input: &str) -> Option<String> {
+    const LINE_WIDTH: usize = 40;
+    const NUM_LINES: usize = 6;
+
+    let mut program = Program::new(input);
+    let mut output = String::new();
+
+    let mut first_line = true;
+    for _ in 0..NUM_LINES {
+        if !first_line {
+            output.push('\n');
+        }
+
+        for col in 0..LINE_WIDTH {
+            let cpu = program.cpu();
+            let sprite_pos = cpu.register();
+            let sprite_pixels = [sprite_pos - 1, sprite_pos, sprite_pos + 1];
+            if sprite_pixels.contains(&(col as i32)) {
+                output.push('#');
+            } else {
+                output.push('.');
+            }
+
+            program.tick();
+        }
+
+        first_line = false;
+    }
+
+    Some(output)
 }
 
 fn main() {
@@ -161,7 +208,23 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 10);
-        assert_eq!(part_two(&input), None);
+
+        let expected_output = "\
+##..##..##..##..##..##..##..##..##..##..
+###...###...###...###...###...###...###.
+####....####....####....####....####....
+#####.....#####.....#####.....#####.....
+######......######......######......####
+#######.......#######.......#######.....";
+
+        let output = part_two(&input).unwrap();
+
+        debugln!("Output:");
+        debugln!("{output}");
+        debugln!("Expected:");
+        debugln!("{expected_output}");
+
+        assert_eq!(output, expected_output);
     }
 }
 
