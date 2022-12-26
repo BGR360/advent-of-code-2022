@@ -25,9 +25,10 @@ where
     T: FromStr,
     <T as FromStr>::Err: std::fmt::Display,
 {
-    combine::from_str(combine::many1::<String, _, _>(
+    combine::from_str(combine::many1::<String, _, _>(combine::choice((
         combine::parser::char::digit(),
-    ))
+        combine::parser::char::char('-'),
+    ))))
 }
 
 pub fn line<Input, P>(parser: P) -> impl Parser<Input, Output = P::Output>

@@ -187,7 +187,7 @@ impl Fingerprint {
             .enumerate()
             .skip_while(|&(index, _)| index < Item::MIN_PRIORITY as usize)
             .map(|(index, count)| {
-                debugln!("index = {index}");
+                //debugln!("index = {index}");
                 let item = Item::try_from(index as u8).unwrap();
                 (item, count)
             })
