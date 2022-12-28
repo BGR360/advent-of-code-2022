@@ -3,6 +3,7 @@
 use std::fmt;
 
 use advent_of_code::debugln;
+use itertools::Itertools;
 use smallvec::SmallVec;
 
 type Grid = grid::Grid<char>;
@@ -47,6 +48,17 @@ impl Puzzle {
         (0..n_rows).contains(&row) && (0..n_cols).contains(&col)
     }
 
+    /// Returns an iterator over all positions in the grid, in row-major order.
+    #[inline]
+    pub fn positions(&self) -> impl Iterator<Item = Pos> {
+        let n_rows = self.grid.rows();
+        let n_cols = self.grid.cols();
+
+        (0..n_rows)
+            .cartesian_product(0..n_cols)
+            .map(|(row, col)| Self::make_pos(row, col))
+    }
+
     /// Returns all the neighbors of the given position.
     pub fn neighbors(&self, pos: Pos) -> SmallVec<[Pos; 4]> {
         let mut neighbors = SmallVec::new();
@@ -77,7 +89,7 @@ impl Puzzle {
         neighbors
     }
 
-    /// Returns the valid neighbors given the criteria in part 1 of the puzzle:
+    /// Returns the valid neighbors given the criteria of the puzzle:
     ///     * the elevation of the destination square can be at most one higher
     ///       than the elevation of your current square
     pub fn valid_neighbors(&self, pos: Pos) -> SmallVec<[Pos; 4]> {
@@ -166,11 +178,30 @@ impl fmt::Display for Puzzle {
     }
 }
 
+fn shortest_path_astar<SuccessorsFn, SuccessorsIt>(
+    puzzle: &Puzzle,
+    successors: SuccessorsFn,
+) -> Vec<Pos>
+where
+    SuccessorsFn: FnMut(&Pos) -> SuccessorsIt,
+    SuccessorsIt: IntoIterator<Item = (Pos, u32)>,
+{
+    let start = puzzle.start;
+    let cost = |pos: &Pos| -> u32 { puzzle.cost(*pos, puzzle.end).unwrap() };
+    let success = |pos: &Pos| *pos == puzzle.end;
+
+    let (path, _cost) =
+        pathfinding::directed::astar::astar(&start, successors, cost, success).unwrap();
+
+    debugln!("path: {path:?}");
+
+    path
+}
+
 pub fn part_one(input: &str) -> Option<usize> {
     let puzzle = Puzzle::parse(input);
     debugln!("{puzzle}");
 
-    let start = puzzle.start;
     let successors = |pos: &Pos| -> SmallVec<[(Pos, u32); 4]> {
         puzzle
             .valid_neighbors(*pos)
@@ -180,19 +211,49 @@ pub fn part_one(input: &str) -> Option<usize> {
             })
             .collect()
     };
-    let cost = |pos: &Pos| -> u32 { puzzle.cost(*pos, puzzle.end).unwrap() };
-    let success = |pos: &Pos| *pos == puzzle.end;
 
-    let (path, _cost) =
-        pathfinding::directed::astar::astar(&start, successors, cost, success).unwrap();
-
-    debugln!("path: {path:?}");
+    let path = shortest_path_astar(&puzzle, successors);
 
     Some(path.len() - 1)
 }
 
-pub fn part_two(input: &str) -> Option<u32> {
-    None
+pub fn part_two(input: &str) -> Option<usize> {
+    let puzzle = Puzzle::parse(input);
+    debugln!("{puzzle}");
+
+    let successors = |pos: &Pos| -> SmallVec<[(Pos, u32); 4]> {
+        let mut successors: SmallVec<[(Pos, u32); 4]> = puzzle
+            .valid_neighbors(*pos)
+            .into_iter()
+            .map(|neighbor| {
+                (neighbor, 1 /* cost */)
+            })
+            .collect();
+
+        // Consider it free to jump from the start position to *any* position in
+        // the grid that's of the same height.
+        // This should have the effect of making the best starting position be
+        // the 2nd position in the astar path.
+        if *pos == puzzle.start {
+            let all_a_positions = puzzle.positions().filter_map(|p| {
+                if p == *pos {
+                    return None;
+                }
+                let height = puzzle.height(p).unwrap();
+                if height != 0 {
+                    return None;
+                }
+                Some((p, 0 /* cost */))
+            });
+            successors.extend(all_a_positions);
+        }
+
+        successors
+    };
+
+    let path = shortest_path_astar(&puzzle, successors);
+
+    Some(path.len() - 2)
 }
 
 fn main() {
@@ -214,6 +275,6 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 12);
-        assert_eq!(part_two(&input), None);
+        assert_eq!(part_two(&input), Some(29));
     }
 }
