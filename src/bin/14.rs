@@ -46,29 +46,7 @@ impl Grid {
         self.grid.get_mut(row, col)
     }
 
-    pub fn parse_from_input(input: &str) -> Self {
-        let paths: Vec<Path> = input
-            .lines()
-            .map(|line| parse::from_str(line, Path::parser()).unwrap())
-            .collect();
-
-        debugln!("Paths: {paths:?}");
-
-        let (min_x, max_x, max_y) = paths.iter().flat_map(|path| path.iter_points()).fold(
-            (i32::MAX, i32::MIN, i32::MIN),
-            |(min_x, max_x, max_y), pos| {
-                let min_x = min_x.min(pos.x);
-                let max_x = max_x.max(pos.x);
-                let max_y = max_y.max(pos.y);
-                (min_x, max_x, max_y)
-            },
-        );
-
-        let min = Pos { x: min_x, y: 0 };
-        let max = Pos { x: max_x, y: max_y };
-
-        debugln!("min: {min}, max: {max}");
-
+    pub fn from_paths(paths: &[Path], min: Pos, max: Pos) -> Self {
         let rows = max.y - min.y + 1;
         let cols = max.x - min.x + 1;
 
@@ -161,10 +139,42 @@ impl Line {
     }
 }
 
+/// Parses the [`Path`]s from the puzzle input.
+fn parse_paths(input: &str) -> Vec<Path> {
+    input
+        .lines()
+        .map(|line| parse::from_str(line, Path::parser()).unwrap())
+        .collect()
+}
+
+/// Returns the upper-leftmost [`Pos`] and lower-rightmost [`Pos`] that are
+/// touched by a set of [`Path`]s.
+fn path_bounds(paths: &[Path]) -> (Pos, Pos) {
+    const MIN_POS: Pos = Pos {
+        x: i32::MIN,
+        y: i32::MIN,
+    };
+    const MAX_POS: Pos = Pos {
+        x: i32::MAX,
+        y: i32::MAX,
+    };
+
+    paths.iter().flat_map(|path| path.iter_points()).fold(
+        (MAX_POS, MIN_POS),
+        |(mut min, mut max), pos| {
+            min.x = min.x.min(pos.x);
+            min.y = min.y.min(pos.y);
+            max.x = max.x.max(pos.x);
+            max.y = max.y.max(pos.y);
+            (min, max)
+        },
+    )
+}
+
 /// Drops one unit of sand from the provided source position.
 ///
 /// Returns the final resting position of the sand, or `None` if the sand falls
-/// out of the grid.
+/// out of the grid or reaches the sand source.
 fn drop_sand(grid: &Grid, from: Pos) -> Option<Pos> {
     /// The next position a unit of sand goes to after one step.
     enum Next {
@@ -200,16 +210,22 @@ fn drop_sand(grid: &Grid, from: Pos) -> Option<Pos> {
     loop {
         match get_next_pos(pos) {
             Next::Here(next_pos) => pos = next_pos,
-            Next::Stuck => return Some(pos),
+            Next::Stuck => {
+                if pos == from {
+                    // Sand reached the sand source.
+                    return None;
+                } else {
+                    return Some(pos);
+                }
+            }
             Next::OffGrid => return None,
         }
     }
 }
 
-pub fn part_one(input: &str) -> Option<u32> {
-    const SAND_SOURCE: Pos = Pos { x: 500, y: 0 };
+const SAND_SOURCE: Pos = Pos { x: 500, y: 0 };
 
-    let mut grid = Grid::parse_from_input(input);
+fn get_total_units_of_sand(mut grid: Grid) -> u32 {
     debugln!();
     debugln!("==== START ====");
     debugln!();
@@ -226,11 +242,46 @@ pub fn part_one(input: &str) -> Option<u32> {
     debugln!();
     debugln!("{grid}");
 
-    Some(units_of_sand)
+    units_of_sand
+}
+
+pub fn part_one(input: &str) -> Option<u32> {
+    let paths = parse_paths(input);
+
+    let (mut min, max) = path_bounds(&paths);
+    min.y = 0;
+
+    debugln!("min: {min}, max: {max}");
+
+    let grid = Grid::from_paths(&paths, min, max);
+    Some(get_total_units_of_sand(grid))
 }
 
 pub fn part_two(input: &str) -> Option<u32> {
-    None
+    let mut paths = parse_paths(input);
+
+    let (_min, Pos { y: y_max, .. }) = path_bounds(&paths);
+
+    // Add the floor two units below y_max. Make it wide enough to support a
+    // perfect pyramid of sand with its peak at the sand source.
+    let y_max = y_max + 2;
+    let x_min = SAND_SOURCE.x - y_max;
+    let x_max = SAND_SOURCE.x + y_max;
+
+    let floor_path = Path {
+        points: vec![Pos { x: x_min, y: y_max }, Pos { x: x_max, y: y_max }],
+    };
+    paths.push(floor_path);
+
+    let min = Pos { x: x_min, y: 0 };
+    let max = Pos { x: x_max, y: y_max };
+
+    debugln!("min: {min}, max: {max}");
+
+    let grid = Grid::from_paths(&paths, min, max);
+    Some(
+        get_total_units_of_sand(grid) + 1, /* to account for the last one */
+    )
 }
 
 fn main() {
@@ -252,7 +303,7 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = advent_of_code::read_file("examples", 14);
-        assert_eq!(part_two(&input), None);
+        assert_eq!(part_two(&input), Some(93));
     }
 }
 
