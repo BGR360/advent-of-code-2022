@@ -1,15 +1,11 @@
 #![doc = include_str!("../puzzles/16.md")]
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    io::Write,
-};
+use std::collections::HashMap;
 
-use advent_of_code::debugln;
 use bitvec::BitArr;
-use itertools::Itertools;
-use rayon::prelude::*;
 use smallvec::SmallVec;
+
+type BitArray = BitArr!(for 64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ValveName(pub char, pub char);
@@ -94,71 +90,21 @@ impl Volcano {
     }
 }
 
-#[derive(Debug)]
-struct Distances {
-    distances: BTreeMap<(ValveId, ValveId), u32>,
-}
-
-impl Distances {
-    #[inline]
-    pub fn get_between(&self, a: ValveId, b: ValveId) -> Option<u32> {
-        let key = if b < a { (b, a) } else { (a, b) };
-
-        self.distances.get(&key).copied()
-    }
-
-    pub fn for_volcano(volcano: &Volcano) -> Self {
-        let distances = volcano
-            .valve_ids()
-            .par_bridge()
-            .flat_map(|i| Self::for_starting_pos(volcano, i))
-            .collect();
-        Self { distances }
-    }
-
-    fn for_starting_pos(volcano: &Volcano, start: ValveId) -> Vec<((ValveId, ValveId), u32)> {
-        let successors = |&id: &ValveId| -> Vec<(ValveId, u32)> {
-            volcano
-                .valve(id)
-                .unwrap()
-                .connections
-                .iter()
-                .map(|&id| (id, 1 /* cost (1 minute) */))
-                .collect()
-        };
-        let mut distances = pathfinding::directed::dijkstra::dijkstra_all(&start, successors);
-        distances.insert(start, (start, 0));
-
-        distances
-            .into_iter()
-            .filter_map(move |(end, (_ignored, distance))| {
-                if start <= end {
-                    Some(((start, end), distance))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Node {
     pub valve: Option<ValveId>,
+    pub open_valves: BitArray,
     pub minutes_remaining: u8,
 }
 
 impl Node {
     pub const END: Self = Self {
         valve: None,
+        open_valves: BitArray::ZERO,
         minutes_remaining: 0,
     };
 
-    pub fn successors(
-        &self,
-        volcano: &Volcano,
-        distances: &Distances,
-    ) -> SmallVec<[(Node, u64); 8]> {
+    pub fn successors(&self, volcano: &Volcano) -> SmallVec<[(Node, u64); 8]> {
         let Some(current_id) = self.valve else {
             return Default::default();
         };
@@ -166,36 +112,48 @@ impl Node {
         let mut successors = SmallVec::new();
 
         let current = volcano.valve(current_id).unwrap();
+        let current_flow_rate = self.flow_rate(volcano);
 
         if let Some(remaining) = self.minutes_remaining.checked_sub(1) {
-            for neighbor_id in current
-                .connections
-                .iter()
-                .copied()
-                .filter(|&id| volcano.valve(id).unwrap().flow_rate != 0)
-            {
-                //let distance = distances.get_between(current_id, neighbor_id).unwrap();
-
+            for neighbor_id in current.connections.iter().copied() {
                 // Travel to neighbor without opening this valve.
                 let successor = Node {
                     valve: Some(neighbor_id),
+                    open_valves: self.open_valves,
                     minutes_remaining: remaining,
                 };
-                successors.push((successor, 0 /* no flow gained by traveling */))
+                successors.push((successor, current_flow_rate.into()))
             }
 
-            // Open this valve without traveling to a neighbor.
-            let flow_gained = u32::from(remaining) * current.flow_rate;
-            let successor = Node {
-                valve: Some(current_id),
-                minutes_remaining: remaining,
-            };
-            successors.push((successor, flow_gained.into()));
+            // Open this valve without traveling to a neighbor, if it's worth
+            // opening.
+            if current.flow_rate != 0 {
+                let mut open_valves = self.open_valves;
+                open_valves.set(current_id.into(), true);
+                let successor = Node {
+                    valve: Some(current_id),
+                    open_valves,
+                    minutes_remaining: remaining,
+                };
+                successors.push((successor, current_flow_rate.into()));
+            }
         } else {
             successors.push((Node::END, 0));
         }
 
         successors
+    }
+
+    #[inline]
+    pub fn flow_rate(&self, volcano: &Volcano) -> u32 {
+        self.open_valves()
+            .map(|id| volcano.valve(id).unwrap().flow_rate)
+            .sum()
+    }
+
+    #[inline]
+    pub fn open_valves(&self) -> impl Iterator<Item = ValveId> + '_ {
+        self.open_valves.iter_ones().map(ValveId::from)
     }
 }
 
@@ -206,35 +164,21 @@ fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
 }
 
 fn get_max_pressure_released(volcano: &Volcano, minutes: u8) -> Option<u32> {
-    let distances = Distances::for_volcano(volcano);
-    println!("Distances: {distances:?}");
-
-    let non_zero_valves: Vec<ValveId> = volcano
-        .valve_ids()
-        .filter(|&id| volcano.valve(id).unwrap().flow_rate != 0)
-        .collect();
-
-    println!(
-        "Non-zero valves: {:?}",
-        valve_ids_to_strings(volcano, &non_zero_valves)
-    );
-
-    std::io::stdout().flush().unwrap();
-
     let start = Node {
         valve: Some(volcano.name_to_id(ValveName::AA).unwrap()),
+        open_valves: BitArray::ZERO,
         minutes_remaining: minutes,
     };
-    let end = Node::END;
 
     let successors = |node: &Node| -> SmallVec<[(Node, u64); 8]> {
-        let mut successors = node.successors(volcano, &distances);
+        let mut successors = node.successors(volcano);
 
         // Need to formulate the problem as min-cost path for Dijkstra's.
         for (succ, cost) in successors.iter_mut() {
             *cost = if *succ == Node::END {
                 // Needs to cost nothing to go to the end node.
-                0
+                // 0
+                u32::MAX.into()
             } else {
                 (u32::MAX - u32::try_from(*cost).unwrap()).into()
             }
@@ -247,9 +191,36 @@ fn get_max_pressure_released(volcano: &Volcano, minutes: u8) -> Option<u32> {
     let (best_path, _inverted_cost) =
         pathfinding::directed::dijkstra::dijkstra(&start, successors, success).unwrap();
 
-    println!("best_path: {best_path:#?}");
+    println!();
+    println!("=== Best Path ===");
+    println!();
 
-    None
+    let mut total_flow = 0;
+    for &node in &best_path {
+        if let Some(valve) = node.valve {
+            let minute = node.minutes_remaining;
+            let name = volcano.valve(valve).unwrap().name;
+
+            let open_valves: Vec<String> = node
+                .open_valves()
+                .map(|id| volcano.valve(id).unwrap().name.to_string())
+                .collect();
+
+            let additional_flow = if node.minutes_remaining != 0 {
+                node.flow_rate(volcano)
+            } else {
+                0
+            };
+
+            println!(
+                "t={minute:>2}, f={total_flow:>4}, v={name}, {open_valves:?} -> +{additional_flow}"
+            );
+
+            total_flow += additional_flow;
+        }
+    }
+
+    Some(total_flow)
 }
 
 fn part_one(volcano: &Volcano) -> Option<u32> {
@@ -258,46 +229,6 @@ fn part_one(volcano: &Volcano) -> Option<u32> {
 
 fn part_two(input: &Volcano) -> Option<u32> {
     None
-}
-
-fn example_volcano() -> Volcano {
-    const AA: ValveName = ValveName('A', 'A');
-    const BB: ValveName = ValveName('B', 'B');
-    const CC: ValveName = ValveName('C', 'C');
-    const DD: ValveName = ValveName('D', 'D');
-    const EE: ValveName = ValveName('E', 'E');
-    const FF: ValveName = ValveName('F', 'F');
-    const GG: ValveName = ValveName('G', 'G');
-    const HH: ValveName = ValveName('H', 'H');
-    const II: ValveName = ValveName('I', 'I');
-    const JJ: ValveName = ValveName('J', 'J');
-
-    Volcano::new([
-        (AA, 0, vec![DD, II, BB]),
-        (BB, 13, vec![CC, AA]),
-        (CC, 2, vec![DD, BB]),
-        (DD, 20, vec![CC, AA, EE]),
-        (EE, 3, vec![FF, DD]),
-        (FF, 0, vec![EE, GG]),
-        (GG, 0, vec![FF, HH]),
-        (HH, 22, vec![GG]),
-        (II, 0, vec![AA, JJ]),
-        (JJ, 21, vec![II]),
-    ])
-}
-
-fn tiny_volcano() -> Volcano {
-    const AA: ValveName = ValveName('A', 'A');
-    const BB: ValveName = ValveName('B', 'B');
-    const CC: ValveName = ValveName('C', 'C');
-    const DD: ValveName = ValveName('D', 'D');
-
-    Volcano::new([
-        (AA, 3, vec![BB, DD]),
-        (BB, 13, vec![AA, CC]),
-        (CC, 2, vec![BB, DD]),
-        (DD, 20, vec![CC, AA]),
-    ])
 }
 
 include!("../inputs/16.rs");
@@ -311,6 +242,46 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn example_volcano() -> Volcano {
+        const AA: ValveName = ValveName('A', 'A');
+        const BB: ValveName = ValveName('B', 'B');
+        const CC: ValveName = ValveName('C', 'C');
+        const DD: ValveName = ValveName('D', 'D');
+        const EE: ValveName = ValveName('E', 'E');
+        const FF: ValveName = ValveName('F', 'F');
+        const GG: ValveName = ValveName('G', 'G');
+        const HH: ValveName = ValveName('H', 'H');
+        const II: ValveName = ValveName('I', 'I');
+        const JJ: ValveName = ValveName('J', 'J');
+
+        Volcano::new([
+            (AA, 0, vec![DD, II, BB]),
+            (BB, 13, vec![CC, AA]),
+            (CC, 2, vec![DD, BB]),
+            (DD, 20, vec![CC, AA, EE]),
+            (EE, 3, vec![FF, DD]),
+            (FF, 0, vec![EE, GG]),
+            (GG, 0, vec![FF, HH]),
+            (HH, 22, vec![GG]),
+            (II, 0, vec![AA, JJ]),
+            (JJ, 21, vec![II]),
+        ])
+    }
+
+    fn tiny_volcano() -> Volcano {
+        const AA: ValveName = ValveName('A', 'A');
+        const BB: ValveName = ValveName('B', 'B');
+        const CC: ValveName = ValveName('C', 'C');
+        const DD: ValveName = ValveName('D', 'D');
+
+        Volcano::new([
+            (AA, 3, vec![BB, DD]),
+            (BB, 13, vec![AA, CC]),
+            (CC, 2, vec![BB, DD]),
+            (DD, 20, vec![CC, AA]),
+        ])
+    }
 
     #[test]
     fn test_part_one_tiny() {
