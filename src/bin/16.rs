@@ -9,6 +9,7 @@ use advent_of_code::debugln;
 use bitvec::BitArr;
 use itertools::Itertools;
 use rayon::prelude::*;
+use smallvec::SmallVec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ValveName(pub char, pub char);
@@ -93,38 +94,6 @@ impl Volcano {
     }
 }
 
-#[derive(Debug, Clone)]
-struct State {
-    pub valve: ValveId,
-    pub minutes_remaining: u32,
-    pub total_flow: u32,
-    pub open_valves: ValveVec<bool>,
-}
-
-impl State {
-    pub fn advance_minute(&mut self, volcano: &Volcano) {
-        assert!(self.minutes_remaining > 0);
-
-        let additional_flow: u32 = (0..volcano.valve_count())
-            .map(ValveId::from)
-            .filter(|&id| self.valve_is_open(id))
-            .map(|id| volcano.valve(id).unwrap().flow_rate)
-            .sum();
-        self.total_flow += additional_flow;
-
-        self.minutes_remaining -= 1;
-    }
-
-    pub fn open_valve(&mut self, id: ValveId) {
-        assert!(!self.valve_is_open(id));
-        self.open_valves[id] = true;
-    }
-
-    pub fn valve_is_open(&self, id: ValveId) -> bool {
-        self.open_valves[id]
-    }
-}
-
 #[derive(Debug)]
 struct Distances {
     distances: BTreeMap<(ValveId, ValveId), u32>,
@@ -173,66 +142,61 @@ impl Distances {
     }
 }
 
-fn get_max_total_flow_for_valves(
-    volcano: &Volcano,
-    distances: &Distances,
-    valves: &[ValveId],
-    mut minutes: u32,
-    logging: bool,
-) -> u32 {
-    let mut total_flow = 0;
-    let mut flow_rate = 0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Node {
+    pub valve: Option<ValveId>,
+    pub minutes_remaining: u8,
+}
 
-    let start = volcano.name_to_id(ValveName::AA).unwrap();
-    let valves_including_start = std::iter::once(start).chain(valves.iter().copied());
+impl Node {
+    pub const END: Self = Self {
+        valve: None,
+        minutes_remaining: 0,
+    };
 
-    for (valve_a, valve_b) in valves_including_start.tuple_windows() {
-        let minutes_a_to_b = distances.get_between(valve_a, valve_b).unwrap();
-        // Add one minute to turn on the valve.
-        let minutes_a_to_b = minutes_a_to_b + 1;
-        // Don't exceed the remaining minutes.
-        let minutes_a_to_b = minutes_a_to_b.min(minutes);
+    pub fn successors(
+        &self,
+        volcano: &Volcano,
+        distances: &Distances,
+    ) -> SmallVec<[(Node, u64); 8]> {
+        let Some(current_id) = self.valve else {
+            return Default::default();
+        };
 
-        if logging {
-            debugln!("{minutes}: valve {valve_a} -> open valve {valve_b}");
-            debugln!(
-                "    minutes -= {minutes_a_to_b}\t\t// {} -> {}",
-                minutes,
-                minutes - minutes_a_to_b
-            );
-            debugln!(
-                "    total_flow += {flow_rate} * {minutes_a_to_b} \t// {} -> {}",
-                total_flow,
-                total_flow + flow_rate * minutes_a_to_b
-            );
+        let mut successors = SmallVec::new();
+
+        let current = volcano.valve(current_id).unwrap();
+
+        if let Some(remaining) = self.minutes_remaining.checked_sub(1) {
+            for neighbor_id in current
+                .connections
+                .iter()
+                .copied()
+                .filter(|&id| volcano.valve(id).unwrap().flow_rate != 0)
+            {
+                //let distance = distances.get_between(current_id, neighbor_id).unwrap();
+
+                // Travel to neighbor without opening this valve.
+                let successor = Node {
+                    valve: Some(neighbor_id),
+                    minutes_remaining: remaining,
+                };
+                successors.push((successor, 0 /* no flow gained by traveling */))
+            }
+
+            // Open this valve without traveling to a neighbor.
+            let flow_gained = u32::from(remaining) * current.flow_rate;
+            let successor = Node {
+                valve: Some(current_id),
+                minutes_remaining: remaining,
+            };
+            successors.push((successor, flow_gained.into()));
+        } else {
+            successors.push((Node::END, 0));
         }
 
-        // Accumulate flow on the way to valve_b
-        total_flow += flow_rate * minutes_a_to_b;
-
-        minutes -= minutes_a_to_b;
-        if minutes == 0 {
-            break;
-        }
-
-        // Turn on valve_b.
-        let additional_flow = volcano.valve(valve_b).unwrap().flow_rate;
-        if logging {
-            debugln!(
-                "    flow_rate += {additional_flow}\t\t// {} -> {}",
-                flow_rate,
-                flow_rate + additional_flow
-            );
-        }
-        flow_rate += additional_flow;
+        successors
     }
-
-    // Accumulate flow for any leftover minutes.
-    total_flow += flow_rate * minutes;
-
-    debugln!("{valves:?}: {total_flow}");
-
-    total_flow
 }
 
 fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
@@ -241,61 +205,7 @@ fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
         .collect()
 }
 
-fn get_max_pressure_released_for_limited_sequence(
-    volcano: &Volcano,
-    non_zero_valves: &[ValveId],
-    distances: &Distances,
-    minutes: u32,
-    sequence_len: usize,
-) -> u32 {
-    // let (best_sequence, max_total_flow) = non_zero_valves
-    //     .iter()
-    //     .copied()
-    //     .permutations(sequence_len)
-    //     .par_bridge()
-    //     .map(|valves| {
-    //         let total_flow = get_max_total_flow_for_valves(
-    //             volcano, &distances, &valves, minutes, false, /* logging */
-    //         );
-    //         (valves, total_flow)
-    //     })
-    //     .max_by_key(|&(_, flow)| flow)
-    //     .unwrap();
-
-    // println!();
-    // println!(
-    //     "Best sequence: {:?}. Total flow: {max_total_flow}",
-    //     valve_ids_to_strings(volcano, &best_sequence)
-    // );
-    // println!();
-
-    // get_max_total_flow_for_valves(
-    //     volcano,
-    //     &distances,
-    //     &best_sequence,
-    //     minutes,
-    //     true, /* logging */
-    // );
-
-    // max_total_flow
-
-    let count = non_zero_valves
-        .iter()
-        .copied()
-        .permutations(sequence_len)
-        // .par_bridge()
-        .map(|valves| {
-            debugln!("{valves:?}");
-            //print!(".");
-        })
-        .count();
-
-    println!("{count}");
-
-    count.try_into().unwrap()
-}
-
-fn get_max_pressure_released(volcano: &Volcano, minutes: u32) -> Option<u32> {
+fn get_max_pressure_released(volcano: &Volcano, minutes: u8) -> Option<u32> {
     let distances = Distances::for_volcano(volcano);
     println!("Distances: {distances:?}");
 
@@ -311,36 +221,33 @@ fn get_max_pressure_released(volcano: &Volcano, minutes: u32) -> Option<u32> {
 
     std::io::stdout().flush().unwrap();
 
-    let mut max_total_flow = 0;
-    for sequence_len in 1..=non_zero_valves.len() {
-        println!();
-        println!("==== Trying with sequences of {sequence_len} valves ====");
+    let start = Node {
+        valve: Some(volcano.name_to_id(ValveName::AA).unwrap()),
+        minutes_remaining: minutes,
+    };
+    let end = Node::END;
 
-        let best_flow_for_length = get_max_pressure_released_for_limited_sequence(
-            volcano,
-            &non_zero_valves,
-            &distances,
-            minutes,
-            sequence_len,
-        );
+    let successors = |node: &Node| -> SmallVec<[(Node, u64); 8]> {
+        let mut successors = node.successors(volcano, &distances);
 
-        if best_flow_for_length == max_total_flow {
-            break;
+        // Need to formulate the problem as min-cost path for Dijkstra's.
+        for (succ, cost) in successors.iter_mut() {
+            *cost = if *succ == Node::END {
+                // Needs to cost nothing to go to the end node.
+                0
+            } else {
+                (u32::MAX - u32::try_from(*cost).unwrap()).into()
+            }
         }
-        if best_flow_for_length > max_total_flow {
-            max_total_flow = best_flow_for_length;
-        }
-    }
 
-    // Some(max_total_flow)
+        successors
+    };
+    let success = |&node: &Node| node == Node::END;
 
-    // get_max_pressure_released_for_limited_sequence(
-    //     volcano,
-    //     &non_zero_valves,
-    //     &distances,
-    //     minutes,
-    //     non_zero_valves.len(),
-    // );
+    let (best_path, _inverted_cost) =
+        pathfinding::directed::dijkstra::dijkstra(&start, successors, success).unwrap();
+
+    println!("best_path: {best_path:#?}");
 
     None
 }
