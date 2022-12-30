@@ -1,9 +1,14 @@
 #![doc = include_str!("../puzzles/16.md")]
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    io::Write,
+};
 
 use advent_of_code::debugln;
 use bitvec::BitArr;
+use itertools::Itertools;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ValveName(pub char, pub char);
@@ -81,6 +86,11 @@ impl Volcano {
     pub fn name_to_id(&self, name: ValveName) -> Option<ValveId> {
         self.name_to_id.get(&name).copied()
     }
+
+    #[inline]
+    pub fn valve_ids(&self) -> impl Iterator<Item = ValveId> {
+        (0..self.valve_count()).map(ValveId::from)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,130 +125,224 @@ impl State {
     }
 }
 
-/// Returns the id of the valve that should be opened next given the current
-/// state, along with how many minutes it will take to move to that valve and
-/// open it.
-fn get_best_valve_to_open(volcano: &Volcano, state: &State) -> Option<(ValveId, u32)> {
-    use std::fmt;
+#[derive(Debug)]
+struct Distances {
+    distances: BTreeMap<(ValveId, ValveId), u32>,
+}
 
-    // Hashmap from destination id to (<ignored>, distance in minutes).
-    type Distances = HashMap<ValveId, (ValveId, u32)>;
+impl Distances {
+    #[inline]
+    pub fn get_between(&self, a: ValveId, b: ValveId) -> Option<u32> {
+        let key = if b < a { (b, a) } else { (a, b) };
 
-    struct DistancesPrinter<'a> {
-        distances: &'a HashMap<ValveId, (ValveId, u32)>,
-        volcano: &'a Volcano,
+        self.distances.get(&key).copied()
     }
 
-    impl fmt::Display for DistancesPrinter<'_> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let mut map = f.debug_map();
-
-            for (&id, &(_ignored, distance)) in self.distances.iter() {
-                let name = self.volcano.valve(id).unwrap().name;
-                map.entry(&name.to_string(), &distance);
-            }
-
-            map.finish()
-        }
+    pub fn for_volcano(volcano: &Volcano) -> Self {
+        let distances = volcano
+            .valve_ids()
+            .par_bridge()
+            .flat_map(|i| Self::for_starting_pos(volcano, i))
+            .collect();
+        Self { distances }
     }
 
-    debugln!("== Find best valve ==");
-    debugln!("State: {state:?}");
-
-    // Find the shortest path from the current valve to each of the currently
-    // unopened valves (excluding the current one).
-    // `distances` is a hashmap .
-    let start = state.valve;
-    let successors = |&id: &ValveId| -> Vec<(ValveId, u32)> {
-        volcano
-            .valve(id)
-            .unwrap()
-            .connections
-            .iter()
-            .filter(|&&id| !state.valve_is_open(id))
-            .map(|&id| (id, 1 /* cost (1 minute) */))
-            .collect()
-    };
-    let mut distances: Distances =
-        pathfinding::directed::dijkstra::dijkstra_all(&start, successors);
-
-    // Stick an entry in there for opening the current valve, if it's not
-    // already open.
-    if !state.valve_is_open(start) {
-        distances.insert(start, (start, 0));
-    }
-
-    debugln!(
-        "distances: {}",
-        DistancesPrinter {
-            distances: &distances,
+    fn for_starting_pos(volcano: &Volcano, start: ValveId) -> Vec<((ValveId, ValveId), u32)> {
+        let successors = |&id: &ValveId| -> Vec<(ValveId, u32)> {
             volcano
-        }
-    );
+                .valve(id)
+                .unwrap()
+                .connections
+                .iter()
+                .map(|&id| (id, 1 /* cost (1 minute) */))
+                .collect()
+        };
+        let mut distances = pathfinding::directed::dijkstra::dijkstra_all(&start, successors);
+        distances.insert(start, (start, 0));
 
-    // Figure out which candidate valve would yield the most total flow if we
-    // went to turn it on right now.
-    let best = distances
-        .into_iter()
-        .filter_map(|(id, (_ignored, distance))| {
-            // Time to travel to the valve + one more minute to open it.
-            let time_to_open = distance + 1;
-
-            if let Some(minutes_of_flow) = state.minutes_remaining.checked_sub(time_to_open) {
-                let flow_rate = volcano.valve(id).unwrap().flow_rate;
-                Some((id, flow_rate * minutes_of_flow, time_to_open))
-            } else {
-                None
-            }
-        })
-        .max_by(|&(_, flow_a, time_a), &(_, flow_b, time_b)| {
-            // We want max by flow then min by time.
-            let time_a = state.minutes_remaining - time_a;
-            let time_b = state.minutes_remaining - time_b;
-
-            (flow_a, time_a).cmp(&(flow_b, time_b))
-        });
-
-    match best {
-        Some((best_id, total_flow, time_to_open)) => {
-            let best_name = volcano.valve(best_id).unwrap().name;
-            debugln!(
-                "Best next valve: {best_name} ({best_id}), will yield {total_flow} total flow \
-                after {time_to_open} minutes."
-            );
-            Some((best_id, time_to_open))
-        }
-        None => {
-            debugln!("No suitable next valve to open.");
-            None
-        }
+        distances
+            .into_iter()
+            .filter_map(move |(end, (_ignored, distance))| {
+                if start <= end {
+                    Some(((start, end), distance))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
-fn get_max_pressure_released(volcano: &Volcano, minutes: u32) -> Option<u32> {
-    let mut state = State {
-        valve: volcano.name_to_id(ValveName::AA).unwrap(),
-        minutes_remaining: minutes,
-        total_flow: 0,
-        open_valves: vec![false; volcano.valve_count()].into(),
-    };
+fn get_max_total_flow_for_valves(
+    volcano: &Volcano,
+    distances: &Distances,
+    valves: &[ValveId],
+    mut minutes: u32,
+    logging: bool,
+) -> u32 {
+    let mut total_flow = 0;
+    let mut flow_rate = 0;
 
-    loop {
-        if let Some((valve_to_open, time_to_open)) = get_best_valve_to_open(volcano, &state) {
-            // Move to the valve and open it.
-            for _ in 0..time_to_open {
-                state.advance_minute(volcano);
-            }
-            state.open_valve(valve_to_open);
-            state.valve = valve_to_open;
-        } else {
+    let start = volcano.name_to_id(ValveName::AA).unwrap();
+    let valves_including_start = std::iter::once(start).chain(valves.iter().copied());
+
+    for (valve_a, valve_b) in valves_including_start.tuple_windows() {
+        let minutes_a_to_b = distances.get_between(valve_a, valve_b).unwrap();
+        // Add one minute to turn on the valve.
+        let minutes_a_to_b = minutes_a_to_b + 1;
+        // Don't exceed the remaining minutes.
+        let minutes_a_to_b = minutes_a_to_b.min(minutes);
+
+        if logging {
+            debugln!("{minutes}: valve {valve_a} -> open valve {valve_b}");
+            debugln!(
+                "    minutes -= {minutes_a_to_b}\t\t// {} -> {}",
+                minutes,
+                minutes - minutes_a_to_b
+            );
+            debugln!(
+                "    total_flow += {flow_rate} * {minutes_a_to_b} \t// {} -> {}",
+                total_flow,
+                total_flow + flow_rate * minutes_a_to_b
+            );
+        }
+
+        // Accumulate flow on the way to valve_b
+        total_flow += flow_rate * minutes_a_to_b;
+
+        minutes -= minutes_a_to_b;
+        if minutes == 0 {
             break;
+        }
+
+        // Turn on valve_b.
+        let additional_flow = volcano.valve(valve_b).unwrap().flow_rate;
+        if logging {
+            debugln!(
+                "    flow_rate += {additional_flow}\t\t// {} -> {}",
+                flow_rate,
+                flow_rate + additional_flow
+            );
+        }
+        flow_rate += additional_flow;
+    }
+
+    // Accumulate flow for any leftover minutes.
+    total_flow += flow_rate * minutes;
+
+    debugln!("{valves:?}: {total_flow}");
+
+    total_flow
+}
+
+fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
+    ids.iter()
+        .map(|&id| volcano.valve(id).unwrap().name.to_string())
+        .collect()
+}
+
+fn get_max_pressure_released_for_limited_sequence(
+    volcano: &Volcano,
+    non_zero_valves: &[ValveId],
+    distances: &Distances,
+    minutes: u32,
+    sequence_len: usize,
+) -> u32 {
+    // let (best_sequence, max_total_flow) = non_zero_valves
+    //     .iter()
+    //     .copied()
+    //     .permutations(sequence_len)
+    //     .par_bridge()
+    //     .map(|valves| {
+    //         let total_flow = get_max_total_flow_for_valves(
+    //             volcano, &distances, &valves, minutes, false, /* logging */
+    //         );
+    //         (valves, total_flow)
+    //     })
+    //     .max_by_key(|&(_, flow)| flow)
+    //     .unwrap();
+
+    // println!();
+    // println!(
+    //     "Best sequence: {:?}. Total flow: {max_total_flow}",
+    //     valve_ids_to_strings(volcano, &best_sequence)
+    // );
+    // println!();
+
+    // get_max_total_flow_for_valves(
+    //     volcano,
+    //     &distances,
+    //     &best_sequence,
+    //     minutes,
+    //     true, /* logging */
+    // );
+
+    // max_total_flow
+
+    let count = non_zero_valves
+        .iter()
+        .copied()
+        .permutations(sequence_len)
+        // .par_bridge()
+        .map(|valves| {
+            debugln!("{valves:?}");
+            //print!(".");
+        })
+        .count();
+
+    println!("{count}");
+
+    count.try_into().unwrap()
+}
+
+fn get_max_pressure_released(volcano: &Volcano, minutes: u32) -> Option<u32> {
+    let distances = Distances::for_volcano(volcano);
+    println!("Distances: {distances:?}");
+
+    let non_zero_valves: Vec<ValveId> = volcano
+        .valve_ids()
+        .filter(|&id| volcano.valve(id).unwrap().flow_rate != 0)
+        .collect();
+
+    println!(
+        "Non-zero valves: {:?}",
+        valve_ids_to_strings(volcano, &non_zero_valves)
+    );
+
+    std::io::stdout().flush().unwrap();
+
+    let mut max_total_flow = 0;
+    for sequence_len in 1..=non_zero_valves.len() {
+        println!();
+        println!("==== Trying with sequences of {sequence_len} valves ====");
+
+        let best_flow_for_length = get_max_pressure_released_for_limited_sequence(
+            volcano,
+            &non_zero_valves,
+            &distances,
+            minutes,
+            sequence_len,
+        );
+
+        if best_flow_for_length == max_total_flow {
+            break;
+        }
+        if best_flow_for_length > max_total_flow {
+            max_total_flow = best_flow_for_length;
         }
     }
 
-    debugln!("Final state: {state:#?}");
+    // Some(max_total_flow)
 
-    Some(state.total_flow)
+    // get_max_pressure_released_for_limited_sequence(
+    //     volcano,
+    //     &non_zero_valves,
+    //     &distances,
+    //     minutes,
+    //     non_zero_valves.len(),
+    // );
+
+    None
 }
 
 fn part_one(volcano: &Volcano) -> Option<u32> {
@@ -292,8 +396,7 @@ fn tiny_volcano() -> Volcano {
 include!("../inputs/16.rs");
 
 fn main() {
-    //let input = input();
-    let input = example_volcano();
+    let input = input();
     advent_of_code::solve!(1, part_one, &input);
     advent_of_code::solve!(2, part_two, &input);
 }
