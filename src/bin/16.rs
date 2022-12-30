@@ -1,11 +1,9 @@
 #![doc = include_str!("../puzzles/16.md")]
 
-use std::{collections::HashMap, ops};
+use std::collections::{HashMap, HashSet};
 
 use advent_of_code::debugln;
 use bitvec::BitArr;
-
-type BitArray = BitArr!(for 64, in u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ValveName(pub char, pub char);
@@ -85,307 +83,162 @@ impl Volcano {
     }
 }
 
-/// Memoized data for the dynamic programming solution.
-///
-/// This puzzle can be viewed as a variation of the [0-1 Knapsack
-/// Problem][knapsack].
-///
-/// In 0-1 Knapsack, there are `N` items with values `v[0..N]` and weights
-/// `w[0..N]`, and a knapsack with capacity `W`. The goal is to fit as many
-/// items into the knapsack as you can while maximizing their combined value.
-///
-/// In this puzzle, the "items" are the valves, and the "knapsack" is the 30
-/// minutes we have to spend until the volcano blows. Traveling between valves
-/// and opening them is the "weight" that takes away from our 30 minutes. The
-/// flow that each valve provides is its "value" that we are trying to maximize.
-///
-/// ### Differences to 0-1 Knapsack
-///
-///
-///
-/// ## The Regular 0-1 Knapsack DP Solution
-///
-/// The dynamic programming solution for 0-1 Knapsack works as follows:
-///
-/// Let `m[0..N, 0..W]` be the memoized data, where `m[i, w]` is the maximum value
-/// that can be attained with weight less than or equal to `w` using only items
-/// `v[0..i]` (the first `i` items):
-///
-/// ```txt
-///
-/// ```
-///
-/// ## How This Solution Works
-///
-/// This solution operates on the same principle.
-///
-/// [knapsack]: <https://en.wikipedia.org/wiki/Knapsack_problem>
-#[derive(Debug)]
-struct Memo<'a> {
-    pub volcano: &'a Volcano,
-    pub valves: ValveVec<ValveMemo>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MemoIndex {
-    pub valve: ValveId,
-    pub minute: usize,
-    pub range: ValveId,
-}
-
-impl<'a> Memo<'a> {
-    pub fn new(volcano: &'a Volcano) -> Self {
-        let mut valves = ValveVec::new();
-        valves.resize(volcano.valve_count(), ValveMemo::default());
-
-        Memo { volcano, valves }
-    }
-
-    #[inline]
-    pub fn get_entry(&self, index: MemoIndex) -> Option<MemoEntry> {
-        let MemoIndex {
-            valve,
-            minute,
-            range,
-        } = index;
-        self.valves
-            .get(valve)?
-            .minutes
-            .get(minute - 1)?
-            .ranges
-            .get(range)
-            .copied()
-    }
-}
-
-impl Memo<'_> {
-    pub fn display(&self) -> self::formatting::MemoPrinter<'_> {
-        formatting::MemoPrinter::new(self)
-    }
-}
-
-/// Per-valve memoized data.
-#[derive(Debug, Default, Clone)]
-struct ValveMemo {
-    /// Index 0 is the flow that can be attained after 1 minute when starting at
-    /// this valve.
-    pub minutes: Vec<MinuteMemo>,
-}
-
-impl ValveMemo {
-    pub fn display<'a>(&'a self, volcano: &'a Volcano) -> self::formatting::ValveMemoPrinter<'a> {
-        formatting::ValveMemoPrinter::new(volcano, self)
-    }
-}
-
 #[derive(Debug, Clone)]
-struct MinuteMemo {
-    /// Flow that can be attained when you're only allowed to use valves
-    /// `0..=i`.
-    ///
-    /// For example, index 0 is the flow that can be attained when only opening
-    /// valve 0, index 1 is what can be attained when you can open only valves 0
-    /// and 1, and the last index is what can be attained when you can open all
-    /// valves.
-    pub ranges: ValveVec<MemoEntry>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MemoEntry {
+struct State {
+    pub valve: ValveId,
+    pub minutes_remaining: u32,
     pub total_flow: u32,
-    pub prev: MemoIndex,
+    pub open_valves: ValveVec<bool>,
 }
 
-impl PartialOrd for MemoEntry {
-    #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.total_flow.partial_cmp(&other.total_flow)
+impl State {
+    pub fn advance_minute(&mut self, volcano: &Volcano) {
+        assert!(self.minutes_remaining > 0);
+
+        let additional_flow: u32 = (0..volcano.valve_count())
+            .map(ValveId::from)
+            .filter(|&id| self.valve_is_open(id))
+            .map(|id| volcano.valve(id).unwrap().flow_rate)
+            .sum();
+        self.total_flow += additional_flow;
+
+        self.minutes_remaining -= 1;
+    }
+
+    pub fn open_valve(&mut self, id: ValveId) {
+        assert!(!self.valve_is_open(id));
+        self.open_valves[id] = true;
+    }
+
+    pub fn valve_is_open(&self, id: ValveId) -> bool {
+        self.open_valves[id]
     }
 }
 
-impl Ord for MemoEntry {
-    #[inline]
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.total_flow.cmp(&other.total_flow)
+/// Returns the id of the valve that should be opened next given the current
+/// state, along with how many minutes it will take to move to that valve and
+/// open it.
+fn get_best_valve_to_open(volcano: &Volcano, state: &State) -> Option<(ValveId, u32)> {
+    use std::fmt;
+
+    // Hashmap from destination id to (<ignored>, distance in minutes).
+    type Distances = HashMap<ValveId, (ValveId, u32)>;
+
+    struct DistancesPrinter<'a> {
+        distances: &'a HashMap<ValveId, (ValveId, u32)>,
+        volcano: &'a Volcano,
     }
-}
 
-/// Minute must be at least 1.
-/// The memo must already be filled out for minutes less than `minute` for all valves.
-fn compute_minute_for_valve(memo: &Memo, valve: ValveId, minute: usize) -> MinuteMemo {
-    debugln!("Computing minute {minute} for valve {valve}");
+    impl fmt::Display for DistancesPrinter<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let mut map = f.debug_map();
 
-    let mut ranges = ValveVec::new();
+            for (&id, &(_ignored, distance)) in self.distances.iter() {
+                let name = self.volcano.valve(id).unwrap().name;
+                map.entry(&name.to_string(), &distance);
+            }
 
-    let find_best_neighbor = |max_allowed_valve: ValveId, minute: usize| -> (ValveId, u32) {
-        let neighbors = &memo.volcano.valve(valve).unwrap().connections;
+            map.finish()
+        }
+    }
 
-        let (best_valve, best_flow) = neighbors
+    debugln!("== Find best valve ==");
+    debugln!("State: {state:?}");
+
+    // Find the shortest path from the current valve to each of the currently
+    // unopened valves (excluding the current one).
+    // `distances` is a hashmap .
+    let start = state.valve;
+    let successors = |&id: &ValveId| -> Vec<(ValveId, u32)> {
+        volcano
+            .valve(id)
+            .unwrap()
+            .connections
             .iter()
-            .filter(|&&id| id <= max_allowed_valve)
-            .map(|&id| {
-                let index = MemoIndex {
-                    valve: id,
-                    minute,
-                    range: max_allowed_valve,
-                };
-                //debugln!("index: {index:?}");
-                (id, memo.get_entry(index).unwrap().total_flow)
-            })
-            .max_by_key(|&(_id, flow)| flow)
-            .unwrap_or((valve, 0));
-
-        debugln!("candidate: valve={best_valve}, flow={best_flow}");
-
-        (best_valve, best_flow)
+            .filter(|&&id| !state.valve_is_open(id))
+            .map(|&id| (id, 1 /* cost (1 minute) */))
+            .collect()
     };
+    let mut distances: Distances =
+        pathfinding::directed::dijkstra::dijkstra_all(&start, successors);
 
-    // Option 1: We don't turn on this valve during this minute; do the best we
-    // can with its neighbors.
-    let option_1 = |max_allowed_valve| -> MemoEntry {
-        let mut entry = MemoEntry {
-            total_flow: 0,
-            prev: MemoIndex {
-                valve,
-                // Subtract one minute for the time it takes to travel to the neighbor.
-                minute: minute - 1,
-                range: max_allowed_valve,
-            },
-        };
-        if entry.prev.minute == 0 {
-            return entry;
-        }
-        // if entry.prev.range == 0 {
-        //     return entry;
-        // }
-        // entry.prev.range -= 1;
-
-        (entry.prev.valve, entry.total_flow) =
-            find_best_neighbor(entry.prev.range, entry.prev.minute);
-
-        entry
-    };
-
-    // Option 2: We turn on this valve during this minute.
-    let option_2 = |max_allowed_valve| -> MemoEntry {
-        let mut index = MemoIndex {
-            valve,
-            // Subtract one minute for the time it takes to turn on this valve.
-            minute: minute - 1,
-            range: max_allowed_valve,
-        };
-
-        let entry = |total_flow, index| MemoEntry {
-            total_flow,
-            prev: index,
-        };
-
-        if valve > max_allowed_valve {
-            return entry(0, index);
-        }
-        if index.minute == 0 {
-            return entry(0, index);
-        }
-
-        // Calculate how much flow would result from this valve being turned on
-        // during this minute.
-        let flow_rate = memo.volcano.valve(valve).unwrap().flow_rate;
-        let this_flow = flow_rate * u32::try_from(index.minute).unwrap();
-
-        // Subtract one minute for the time it takes to visit a neighbor.
-        index.minute -= 1;
-        if index.minute == 0 {
-            return entry(this_flow, index);
-        }
-
-        // See how much more flow we can get by visiting a neighbor, excluding
-        // this valve.
-        // if index.range == 0 {
-        //     return entry(this_flow, index);
-        // }
-        if valve == 0 {
-            return entry(this_flow, index);
-        }
-        index.range = valve - 1;
-        let (neighbor, neighbor_flow) = find_best_neighbor(index.range, index.minute);
-
-        index.valve = neighbor;
-
-        entry(this_flow + neighbor_flow, index)
-    };
-
-    for i in 0..memo.valves.len() {
-        let max_allowed_valve = ValveId::from(i);
-
-        let option1 = option_1(max_allowed_valve);
-        let option2 = option_2(max_allowed_valve);
-
-        let best = if option1.total_flow >= option2.total_flow {
-            option1
-        } else {
-            option2
-        };
-
-        ranges.push(best);
+    // Stick an entry in there for opening the current valve, if it's not
+    // already open.
+    if !state.valve_is_open(start) {
+        distances.insert(start, (start, 0));
     }
 
-    MinuteMemo { ranges }
+    debugln!(
+        "distances: {}",
+        DistancesPrinter {
+            distances: &distances,
+            volcano
+        }
+    );
+
+    // Figure out which candidate valve would yield the most total flow if we
+    // went to turn it on right now.
+    let best = distances
+        .into_iter()
+        .filter_map(|(id, (_ignored, distance))| {
+            // Time to travel to the valve + one more minute to open it.
+            let time_to_open = distance + 1;
+
+            if let Some(minutes_of_flow) = state.minutes_remaining.checked_sub(time_to_open) {
+                let flow_rate = volcano.valve(id).unwrap().flow_rate;
+                Some((id, flow_rate * minutes_of_flow, time_to_open))
+            } else {
+                None
+            }
+        })
+        .max_by(|&(_, flow_a, time_a), &(_, flow_b, time_b)| {
+            // We want max by flow then min by time.
+            let time_a = state.minutes_remaining - time_a;
+            let time_b = state.minutes_remaining - time_b;
+
+            (flow_a, time_a).cmp(&(flow_b, time_b))
+        });
+
+    match best {
+        Some((best_id, total_flow, time_to_open)) => {
+            let best_name = volcano.valve(best_id).unwrap().name;
+            debugln!(
+                "Best next valve: {best_name} ({best_id}), will yield {total_flow} total flow \
+                after {time_to_open} minutes."
+            );
+            Some((best_id, time_to_open))
+        }
+        None => {
+            debugln!("No suitable next valve to open.");
+            None
+        }
+    }
 }
 
-fn get_max_pressure_released(volcano: &Volcano, minutes: usize) -> Option<u32> {
-    let mut memo = Memo::new(volcano);
-
-    for minute in 1..=minutes {
-        for valve in 0..volcano.valve_count() {
-            let valve = ValveId::from(valve);
-            let minute_memo = compute_minute_for_valve(&memo, valve, minute);
-            memo.valves[valve].minutes.push(minute_memo);
-        }
-
-        if minute % 5 == 0 {
-            debugln!("{}", memo.display());
-        }
-    }
-
-    let aa_memo = &memo.valves[volcano.name_to_id(ValveName::AA).unwrap()];
-    let last_minute = aa_memo.minutes.last().unwrap();
-    let best_flow = last_minute.ranges.last().unwrap().total_flow;
-
-    debugln!("Best flow: {best_flow}");
-
-    // Reconstruct the steps taken.
-
-    #[derive(Debug)]
-    struct Step {
-        current: ValveName,
-        turn_it_on: bool,
-    }
-
-    let mut steps = Vec::new();
-    let mut index = MemoIndex {
+fn get_max_pressure_released(volcano: &Volcano, minutes: u32) -> Option<u32> {
+    let mut state = State {
         valve: volcano.name_to_id(ValveName::AA).unwrap(),
-        minute: minutes,
-        range: ValveId::from(volcano.valve_count() - 1),
+        minutes_remaining: minutes,
+        total_flow: 0,
+        open_valves: vec![false; volcano.valve_count()].into(),
     };
+
     loop {
-        let entry = memo.get_entry(index).unwrap();
-
-        let minute_diff = index.minute - entry.prev.minute;
-        let step = Step {
-            current: volcano.valve(index.valve).unwrap().name,
-            turn_it_on: minute_diff == 2,
-        };
-        steps.push(step);
-
-        index = entry.prev;
-        if index.minute == 0 {
+        if let Some((valve_to_open, time_to_open)) = get_best_valve_to_open(volcano, &state) {
+            // Move to the valve and open it.
+            for _ in 0..time_to_open {
+                state.advance_minute(volcano);
+            }
+            state.open_valve(valve_to_open);
+            state.valve = valve_to_open;
+        } else {
             break;
         }
     }
 
-    debugln!("Steps: {steps:#?}");
+    debugln!("Final state: {state:#?}");
 
-    Some(best_flow)
+    Some(state.total_flow)
 }
 
 fn part_one(volcano: &Volcano) -> Option<u32> {
@@ -473,10 +326,7 @@ mod tests {
     #[test]
     fn test_part_one_tiny4() {
         let input = tiny_volcano();
-        assert_eq!(
-            get_max_pressure_released(&input, 7),
-            Some(1 * 3 + 2 * 13 + 5 * 20)
-        );
+        assert_eq!(get_max_pressure_released(&input, 7), Some(2 * 13 + 5 * 20));
     }
 
     #[test]
@@ -506,91 +356,6 @@ mod formatting {
     impl Display for ValveId {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result {
             write!(f, "{}", self.index())
-        }
-    }
-
-    pub(super) struct MemoPrinter<'a> {
-        memo: &'a Memo<'a>,
-    }
-
-    impl<'a> MemoPrinter<'a> {
-        pub fn new(memo: &'a Memo<'a>) -> Self {
-            Self { memo }
-        }
-    }
-
-    impl Display for MemoPrinter<'_> {
-        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-            writeln!(f)?;
-            writeln!(f, "==================================================")?;
-            writeln!(f, "{:^50}", "MEMO")?;
-            writeln!(f, "==================================================")?;
-
-            for i in 0..self.memo.volcano.valve_count() {
-                let valve = ValveId::from(i);
-                let valve_memo = &self.memo.valves[valve];
-                let valve_name = self.memo.volcano.valve(valve).unwrap().name;
-
-                writeln!(f)?;
-                writeln!(f, "=== Valve {valve_name} ===")?;
-                writeln!(f)?;
-                writeln!(f, "{}", valve_memo.display(self.memo.volcano))?;
-            }
-
-            Ok(())
-        }
-    }
-
-    pub(super) struct ValveMemoPrinter<'a> {
-        volcano: &'a Volcano,
-        memo: &'a ValveMemo,
-    }
-
-    impl<'a> ValveMemoPrinter<'a> {
-        pub fn new(volcano: &'a Volcano, memo: &'a ValveMemo) -> Self {
-            Self { volcano, memo }
-        }
-    }
-
-    impl Display for ValveMemoPrinter<'_> {
-        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-            use prettytable::Table;
-
-            let mut table = Table::new();
-
-            let n_minutes = self.memo.minutes.len();
-
-            let minutes = (1..=n_minutes).map(|min| format!("{min}m"));
-            table.set_titles(
-                std::iter::once(String::from("Range:"))
-                    .chain(minutes)
-                    .collect(),
-            );
-
-            let n_valves = self.volcano.valve_count();
-            let min_id = ValveId::from(0);
-
-            let get_valve_name = |id| self.volcano.valve(id).unwrap().name;
-            let get_valve_range = |max_id| {
-                let first = get_valve_name(min_id);
-                let last = get_valve_name(max_id);
-                format!("{first}-{last}")
-            };
-
-            for i in 0..n_valves {
-                let range_max = ValveId::from(i);
-                let range = get_valve_range(range_max);
-
-                let values = (0..n_minutes).map(|min| {
-                    self.memo.minutes[min].ranges[range_max]
-                        .total_flow
-                        .to_string()
-                });
-
-                table.add_row(std::iter::once(range).chain(values).collect());
-            }
-
-            write!(f, "{table}")
         }
     }
 }
