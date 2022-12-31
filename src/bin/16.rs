@@ -1,9 +1,11 @@
 #![doc = include_str!("../puzzles/16.md")]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, hash};
 
+use advent_of_code::debugln;
 use bitvec::BitArr;
-use smallvec::SmallVec;
+use itertools::Itertools;
+use smallvec::{smallvec, SmallVec};
 
 type BitArray = BitArr!(for 64);
 
@@ -90,52 +92,157 @@ impl Volcano {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 struct Node {
-    pub valve: Option<ValveId>,
+    pub my_valve: Option<ValveId>,
+    pub elephant_valve: Option<ValveId>,
     pub open_valves: BitArray,
     pub minutes_remaining: u8,
 }
 
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        ((self.my_valve == other.my_valve && self.elephant_valve == other.elephant_valve)
+            || (self.my_valve == other.elephant_valve && self.elephant_valve == other.my_valve))
+            && self.open_valves == other.open_valves
+            && self.minutes_remaining == other.minutes_remaining
+    }
+}
+
+impl Eq for Node {}
+
+impl hash::Hash for Node {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        use std::cmp::Ordering;
+
+        #[inline]
+        fn cmp_valves(a: Option<ValveId>, b: Option<ValveId>) -> Ordering {
+            match (a, b) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        }
+
+        if cmp_valves(self.my_valve, self.elephant_valve).is_le() {
+            self.my_valve.hash(state);
+            self.elephant_valve.hash(state);
+        } else {
+            self.elephant_valve.hash(state);
+            self.my_valve.hash(state);
+        }
+
+        self.open_valves.hash(state);
+        self.minutes_remaining.hash(state);
+    }
+}
+
+type Successors = SmallVec<[(Node, i64); 8]>;
+
 impl Node {
     pub const END: Self = Self {
-        valve: None,
+        my_valve: None,
+        elephant_valve: None,
         open_valves: BitArray::ZERO,
         minutes_remaining: 0,
     };
 
-    pub fn successors(&self, volcano: &Volcano) -> SmallVec<[(Node, u64); 8]> {
-        let Some(current_id) = self.valve else {
+    pub fn successors(&self, volcano: &Volcano) -> Successors {
+        let Some(my_valve) = self.my_valve else {
             return Default::default();
         };
 
-        let mut successors = SmallVec::new();
-
-        let current = volcano.valve(current_id).unwrap();
         let current_flow_rate = self.flow_rate(volcano);
 
+        let mut successors = SmallVec::new();
+
+        let neighbors = |valve| volcano.valve(valve).unwrap().connections.iter().copied();
+
+        let my_neighbors: SmallVec<[ValveId; 5]> = neighbors(my_valve).collect();
+        let elephant_neighbors: SmallVec<[Option<ValveId>; 5]> =
+            if let Some(elephant_valve) = self.elephant_valve {
+                neighbors(elephant_valve).map(Some).collect()
+            } else {
+                smallvec![None]
+            };
+
+        let worth_opening = |valve: ValveId| {
+            !self.valve_is_open(valve) && volcano.valve(valve).unwrap().flow_rate != 0
+        };
+
+        debugln!("Successors for {self:?}");
+
         if let Some(remaining) = self.minutes_remaining.checked_sub(1) {
-            for neighbor_id in current.connections.iter().copied() {
-                // Travel to neighbor without opening this valve.
-                let successor = Node {
-                    valve: Some(neighbor_id),
+            // Open neither valve and travel to two neighbors.
+            for (&my_neighbor, &elephant_neighbor) in my_neighbors
+                .iter()
+                .cartesian_product(elephant_neighbors.iter())
+            {
+                debugln!(
+                    "  open_neither: my_neighbor={:?}, elephant_neighbor={:?}",
+                    my_neighbor,
+                    elephant_neighbor
+                );
+                let succ = Node {
+                    my_valve: Some(my_neighbor),
+                    elephant_valve: elephant_neighbor,
                     open_valves: self.open_valves,
                     minutes_remaining: remaining,
                 };
-                successors.push((successor, current_flow_rate.into()))
+                successors.push((succ, current_flow_rate.into()));
             }
 
-            // Open this valve without traveling to a neighbor, if it's worth
-            // opening.
-            if current.flow_rate != 0 {
+            // Open my valve only, if it's worth opening.
+            if worth_opening(my_valve) {
                 let mut open_valves = self.open_valves;
-                open_valves.set(current_id.into(), true);
-                let successor = Node {
-                    valve: Some(current_id),
-                    open_valves,
-                    minutes_remaining: remaining,
-                };
-                successors.push((successor, current_flow_rate.into()));
+                open_valves.set(my_valve.into(), true);
+
+                for &elephant_neighbor in elephant_neighbors.iter() {
+                    debugln!("  open_mine: elephant_neighbor={:?}", elephant_neighbor);
+                    let succ = Node {
+                        my_valve: Some(my_valve),
+                        elephant_valve: elephant_neighbor,
+                        open_valves,
+                        minutes_remaining: remaining,
+                    };
+                    successors.push((succ, current_flow_rate.into()));
+                }
+            }
+
+            if let Some(elephant_valve) = self.elephant_valve {
+                // Open the elephant's valve only, if it's worth opening.
+                if worth_opening(elephant_valve) {
+                    let mut open_valves = self.open_valves;
+                    open_valves.set(elephant_valve.into(), true);
+
+                    for &my_neighbor in my_neighbors.iter() {
+                        debugln!("  open_elephant: my_neighbor={:?}", my_neighbor);
+                        let succ = Node {
+                            my_valve: Some(my_neighbor),
+                            elephant_valve: Some(elephant_valve),
+                            open_valves,
+                            minutes_remaining: remaining,
+                        };
+                        successors.push((succ, current_flow_rate.into()));
+                    }
+                }
+
+                // Open both valves, if they're both worth opening.
+                if worth_opening(elephant_valve) && worth_opening(my_valve) {
+                    let mut open_valves = self.open_valves;
+                    open_valves.set(my_valve.into(), true);
+                    open_valves.set(elephant_valve.into(), true);
+
+                    debugln!("  open_both");
+                    let succ = Node {
+                        my_valve: Some(my_valve),
+                        elephant_valve: Some(elephant_valve),
+                        open_valves,
+                        minutes_remaining: remaining,
+                    };
+                    successors.push((succ, current_flow_rate.into()));
+                }
             }
         } else {
             successors.push((Node::END, 0));
@@ -155,6 +262,11 @@ impl Node {
     pub fn open_valves(&self) -> impl Iterator<Item = ValveId> + '_ {
         self.open_valves.iter_ones().map(ValveId::from)
     }
+
+    #[inline]
+    pub fn valve_is_open(&self, id: ValveId) -> bool {
+        self.open_valves.get(id.raw()).map(|b| *b).unwrap_or(false)
+    }
 }
 
 fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
@@ -163,14 +275,19 @@ fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
         .collect()
 }
 
-fn get_max_pressure_released(volcano: &Volcano, minutes: u8) -> Option<u32> {
+fn get_max_pressure_released(
+    volcano: &Volcano,
+    minutes: u8,
+    elephant_helping: bool,
+) -> Option<u32> {
+    let aa = volcano.name_to_id(ValveName::AA).unwrap();
     let start = Node {
-        valve: Some(volcano.name_to_id(ValveName::AA).unwrap()),
+        my_valve: Some(aa),
+        elephant_valve: if elephant_helping { Some(aa) } else { None },
         open_valves: BitArray::ZERO,
         minutes_remaining: minutes,
     };
-
-    let successors = |node: &Node| -> SmallVec<[(Node, u64); 8]> {
+    let successors = |node: &Node| -> Successors {
         let mut successors = node.successors(volcano);
 
         // Need to formulate the problem as min-cost path for Dijkstra's.
@@ -188,47 +305,59 @@ fn get_max_pressure_released(volcano: &Volcano, minutes: u8) -> Option<u32> {
     };
     let success = |&node: &Node| node == Node::END;
 
-    let (best_path, _inverted_cost) =
+    let (best_path, cost) =
         pathfinding::directed::dijkstra::dijkstra(&start, successors, success).unwrap();
 
     println!();
     println!("=== Best Path ===");
     println!();
-
-    let mut total_flow = 0;
-    for &node in &best_path {
-        if let Some(valve) = node.valve {
-            let minute = node.minutes_remaining;
-            let name = volcano.valve(valve).unwrap().name;
-
-            let open_valves: Vec<String> = node
-                .open_valves()
-                .map(|id| volcano.valve(id).unwrap().name.to_string())
-                .collect();
-
-            let additional_flow = if node.minutes_remaining != 0 {
-                node.flow_rate(volcano)
-            } else {
-                0
-            };
-
-            println!(
-                "t={minute:>2}, f={total_flow:>4}, v={name}, {open_valves:?} -> +{additional_flow}"
-            );
-
-            total_flow += additional_flow;
-        }
-    }
+    let total_flow = print_detailed_path_and_get_flow(volcano, &best_path);
 
     Some(total_flow)
 }
 
-fn part_one(volcano: &Volcano) -> Option<u32> {
-    get_max_pressure_released(volcano, 30)
+fn print_detailed_path_and_get_flow(volcano: &Volcano, path: &[Node]) -> u32 {
+    let mut total_flow = 0;
+    for &node in path {
+        let minute = node.minutes_remaining;
+
+        let name = |valve| {
+            if let Some(valve) = valve {
+                volcano.valve(valve).unwrap().name
+            } else {
+                ValveName('(', ')')
+            }
+        };
+        let my_name = name(node.my_valve);
+        let elephant_name = name(node.elephant_valve);
+
+        let open_valves: Vec<String> = node
+            .open_valves()
+            .map(|id| volcano.valve(id).unwrap().name.to_string())
+            .collect();
+
+        let additional_flow = if node.minutes_remaining != 0 {
+            node.flow_rate(volcano)
+        } else {
+            0
+        };
+
+        println!(
+            "t={minute:>2}, f={total_flow:>4}, v0={my_name}, v1={elephant_name}, \
+            {open_valves:?} -> +{additional_flow}"
+        );
+
+        total_flow += additional_flow;
+    }
+    total_flow
 }
 
-fn part_two(input: &Volcano) -> Option<u32> {
-    None
+fn part_one(volcano: &Volcano) -> Option<u32> {
+    get_max_pressure_released(volcano, 30, false /* elephant_helping */)
+}
+
+fn part_two(volcano: &Volcano) -> Option<u32> {
+    get_max_pressure_released(volcano, 26, true /* elephant_helping */)
 }
 
 include!("../inputs/16.rs");
@@ -286,14 +415,17 @@ mod tests {
     #[test]
     fn test_part_one_tiny() {
         let input = tiny_volcano();
-        assert_eq!(get_max_pressure_released(&input, 5), Some(63));
+        assert_eq!(
+            get_max_pressure_released(&input, 5, false /* elephant_helping */),
+            Some(63)
+        );
     }
 
     #[test]
     fn test_part_one_tiny2() {
         let input = tiny_volcano();
         assert_eq!(
-            get_max_pressure_released(&input, 10),
+            get_max_pressure_released(&input, 10, false /* elephant_helping */),
             Some(3 * 3 + 5 * 13 + 8 * 20)
         );
     }
@@ -301,13 +433,19 @@ mod tests {
     #[test]
     fn test_part_one_tiny3() {
         let input = tiny_volcano();
-        assert_eq!(get_max_pressure_released(&input, 6), Some(1 * 13 + 4 * 20));
+        assert_eq!(
+            get_max_pressure_released(&input, 6, false /* elephant_helping */),
+            Some(1 * 13 + 4 * 20)
+        );
     }
 
     #[test]
     fn test_part_one_tiny4() {
         let input = tiny_volcano();
-        assert_eq!(get_max_pressure_released(&input, 7), Some(2 * 13 + 5 * 20));
+        assert_eq!(
+            get_max_pressure_released(&input, 7, false /* elephant_helping */),
+            Some(2 * 13 + 5 * 20)
+        );
     }
 
     #[test]
@@ -319,7 +457,7 @@ mod tests {
     #[test]
     fn test_part_two() {
         let input = example_volcano();
-        assert_eq!(part_two(&input), None);
+        assert_eq!(part_two(&input), Some(1707));
     }
 }
 
