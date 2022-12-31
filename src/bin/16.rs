@@ -1,10 +1,14 @@
 #![doc = include_str!("../puzzles/16.md")]
 
-use std::{collections::HashMap, hash};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash, ops,
+};
 
-use advent_of_code::debugln;
+use advent_of_code::{debug, debugln};
 use bitvec::BitArr;
 use itertools::Itertools;
+use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 
 type BitArray = BitArr!(for 64);
@@ -92,160 +96,143 @@ impl Volcano {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
+struct Distances {
+    distances: BTreeMap<(ValveId, ValveId), u32>,
+}
+
+impl Distances {
+    #[inline]
+    pub fn get_between(&self, a: ValveId, b: ValveId) -> Option<u32> {
+        let key = if b < a { (b, a) } else { (a, b) };
+
+        self.distances.get(&key).copied()
+    }
+
+    pub fn for_volcano(volcano: &Volcano) -> Self {
+        let distances = volcano
+            .valve_ids()
+            .par_bridge()
+            .flat_map(|i| Self::for_starting_pos(volcano, i))
+            .collect();
+        Self { distances }
+    }
+
+    fn for_starting_pos(volcano: &Volcano, start: ValveId) -> Vec<((ValveId, ValveId), u32)> {
+        let successors = |&id: &ValveId| -> Vec<(ValveId, u32)> {
+            volcano
+                .valve(id)
+                .unwrap()
+                .connections
+                .iter()
+                .map(|&id| (id, 1 /* cost (1 minute) */))
+                .collect()
+        };
+        let mut distances = pathfinding::directed::dijkstra::dijkstra_all(&start, successors);
+        distances.insert(start, (start, 0));
+
+        distances
+            .into_iter()
+            .filter_map(move |(end, (_ignored, distance))| {
+                if start <= end {
+                    Some(((start, end), distance))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Node {
-    pub my_valve: Option<ValveId>,
-    pub elephant_valve: Option<ValveId>,
+    pub valve: ValveId,
     pub open_valves: BitArray,
-    pub minutes_remaining: u8,
+    pub minutes_remaining: u32,
 }
 
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        ((self.my_valve == other.my_valve && self.elephant_valve == other.elephant_valve)
-            || (self.my_valve == other.elephant_valve && self.elephant_valve == other.my_valve))
-            && self.open_valves == other.open_valves
-            && self.minutes_remaining == other.minutes_remaining
-    }
-}
-
-impl Eq for Node {}
-
-impl hash::Hash for Node {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        use std::cmp::Ordering;
-
-        #[inline]
-        fn cmp_valves(a: Option<ValveId>, b: Option<ValveId>) -> Ordering {
-            match (a, b) {
-                (Some(a), Some(b)) => a.cmp(&b),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-        }
-
-        if cmp_valves(self.my_valve, self.elephant_valve).is_le() {
-            self.my_valve.hash(state);
-            self.elephant_valve.hash(state);
-        } else {
-            self.elephant_valve.hash(state);
-            self.my_valve.hash(state);
-        }
-
-        self.open_valves.hash(state);
-        self.minutes_remaining.hash(state);
-    }
-}
-
-type Successors = SmallVec<[(Node, i64); 8]>;
+type Successors = SmallVec<[(Node, u64); 8]>;
 
 impl Node {
-    pub const END: Self = Self {
-        my_valve: None,
-        elephant_valve: None,
-        open_valves: BitArray::ZERO,
-        minutes_remaining: 0,
-    };
+    #[inline]
+    pub fn is_end(&self) -> bool {
+        self.minutes_remaining == 0
+    }
 
-    pub fn successors(&self, volcano: &Volcano) -> Successors {
-        let Some(my_valve) = self.my_valve else {
-            return Default::default();
-        };
+    pub fn successors(&self, volcano: &Volcano, distances: &Distances) -> Successors {
+        debugln!("Getting successors for {self:?}");
+
+        let current_id = self.valve;
+
+        let mut successors = Successors::new();
 
         let current_flow_rate = self.flow_rate(volcano);
 
-        let mut successors = SmallVec::new();
-
-        let neighbors = |valve| volcano.valve(valve).unwrap().connections.iter().copied();
-
-        let my_neighbors: SmallVec<[ValveId; 5]> = neighbors(my_valve).collect();
-        let elephant_neighbors: SmallVec<[Option<ValveId>; 5]> =
-            if let Some(elephant_valve) = self.elephant_valve {
-                neighbors(elephant_valve).map(Some).collect()
-            } else {
-                smallvec![None]
+        let make_successor = |node: Node, minutes: u32| -> (Node, u64) {
+            let cost = Cost {
+                minutes,
+                flow_rate: current_flow_rate,
             };
-
-        let worth_opening = |valve: ValveId| {
-            !self.valve_is_open(valve) && volcano.valve(valve).unwrap().flow_rate != 0
+            if node.minutes_remaining == 0 {
+                debugln!("    succ = end");
+            } else {
+                debugln!("    succ = {node:?}");
+            }
+            debugln!(
+                "    flow = {} * {} = {} ({})",
+                cost.minutes,
+                cost.flow_rate,
+                cost.minutes * cost.flow_rate,
+                cost.to_num()
+            );
+            (node, cost.to_num())
         };
 
-        debugln!("Successors for {self:?}");
+        let valve = |id: ValveId| volcano.valve(id).unwrap();
 
-        if let Some(remaining) = self.minutes_remaining.checked_sub(1) {
-            // Open neither valve and travel to two neighbors.
-            for (&my_neighbor, &elephant_neighbor) in my_neighbors
-                .iter()
-                .cartesian_product(elephant_neighbors.iter())
-            {
-                debugln!(
-                    "  open_neither: my_neighbor={:?}, elephant_neighbor={:?}",
-                    my_neighbor,
-                    elephant_neighbor
-                );
-                let succ = Node {
-                    my_valve: Some(my_neighbor),
-                    elephant_valve: elephant_neighbor,
-                    open_valves: self.open_valves,
-                    minutes_remaining: remaining,
-                };
-                successors.push((succ, current_flow_rate.into()));
+        let worth_opening = |id: ValveId| valve(id).flow_rate != 0 && !self.valve_is_open(id);
+
+        let time_to_open = |id: ValveId| {
+            let distance = distances.get_between(current_id, id).unwrap();
+            distance + 1
+        };
+
+        let mut maybe_open_valve = |id: ValveId| {
+            if !worth_opening(id) {
+                return;
             }
 
-            // Open my valve only, if it's worth opening.
-            if worth_opening(my_valve) {
-                let mut open_valves = self.open_valves;
-                open_valves.set(my_valve.into(), true);
-
-                for &elephant_neighbor in elephant_neighbors.iter() {
-                    debugln!("  open_mine: elephant_neighbor={:?}", elephant_neighbor);
-                    let succ = Node {
-                        my_valve: Some(my_valve),
-                        elephant_valve: elephant_neighbor,
-                        open_valves,
-                        minutes_remaining: remaining,
-                    };
-                    successors.push((succ, current_flow_rate.into()));
-                }
+            let minutes_to_open = time_to_open(id);
+            if minutes_to_open > self.minutes_remaining {
+                return;
             }
 
-            if let Some(elephant_valve) = self.elephant_valve {
-                // Open the elephant's valve only, if it's worth opening.
-                if worth_opening(elephant_valve) {
-                    let mut open_valves = self.open_valves;
-                    open_valves.set(elephant_valve.into(), true);
+            let mut open_valves = self.open_valves;
+            open_valves.set(id.into(), true);
 
-                    for &my_neighbor in my_neighbors.iter() {
-                        debugln!("  open_elephant: my_neighbor={:?}", my_neighbor);
-                        let succ = Node {
-                            my_valve: Some(my_neighbor),
-                            elephant_valve: Some(elephant_valve),
-                            open_valves,
-                            minutes_remaining: remaining,
-                        };
-                        successors.push((succ, current_flow_rate.into()));
-                    }
-                }
+            let succ = Node {
+                valve: id,
+                open_valves,
+                minutes_remaining: self.minutes_remaining - minutes_to_open,
+            };
 
-                // Open both valves, if they're both worth opening.
-                if worth_opening(elephant_valve) && worth_opening(my_valve) {
-                    let mut open_valves = self.open_valves;
-                    open_valves.set(my_valve.into(), true);
-                    open_valves.set(elephant_valve.into(), true);
+            successors.push(make_successor(succ, minutes_to_open));
+        };
 
-                    debugln!("  open_both");
-                    let succ = Node {
-                        my_valve: Some(my_valve),
-                        elephant_valve: Some(elephant_valve),
-                        open_valves,
-                        minutes_remaining: remaining,
-                    };
-                    successors.push((succ, current_flow_rate.into()));
-                }
-            }
-        } else {
-            successors.push((Node::END, 0));
+        maybe_open_valve(self.valve);
+
+        // Travel to and open any neighboring valves that are worth opening.
+        for neighbor_id in volcano.valve_ids() {
+            maybe_open_valve(neighbor_id);
+        }
+
+        // End node is always reachable if nothing else is.
+        if successors.is_empty() {
+            let end = Node {
+                minutes_remaining: 0,
+                ..*self
+            };
+            successors.push(make_successor(end, self.minutes_remaining));
         }
 
         successors
@@ -269,6 +256,23 @@ impl Node {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct Cost {
+    /// Distance in minutes to the next node (including one minute to open the
+    /// next valve, if this edge does not lead to the END node).
+    pub minutes: u32,
+    /// Flow rate maintained while traveling to the valve (and while opening it).
+    pub flow_rate: u32,
+}
+
+impl Cost {
+    #[inline(always)]
+    pub fn to_num(self) -> u64 {
+        let cost_for_one_minute = u64::from(u32::MAX - self.flow_rate);
+        cost_for_one_minute * u64::from(self.minutes)
+    }
+}
+
 fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
     ids.iter()
         .map(|&id| volcano.valve(id).unwrap().name.to_string())
@@ -277,36 +281,28 @@ fn valve_ids_to_strings(volcano: &Volcano, ids: &[ValveId]) -> Vec<String> {
 
 fn get_max_pressure_released(
     volcano: &Volcano,
-    minutes: u8,
+    minutes: u32,
     elephant_helping: bool,
 ) -> Option<u32> {
+    let distances = Distances::for_volcano(volcano);
+
     let aa = volcano.name_to_id(ValveName::AA).unwrap();
     let start = Node {
-        my_valve: Some(aa),
-        elephant_valve: if elephant_helping { Some(aa) } else { None },
+        valve: aa,
         open_valves: BitArray::ZERO,
         minutes_remaining: minutes,
     };
-    let successors = |node: &Node| -> Successors {
-        let mut successors = node.successors(volcano);
 
-        // Need to formulate the problem as min-cost path for Dijkstra's.
-        for (succ, cost) in successors.iter_mut() {
-            *cost = if *succ == Node::END {
-                // Needs to cost nothing to go to the end node.
-                // 0
-                u32::MAX.into()
-            } else {
-                (u32::MAX - u32::try_from(*cost).unwrap()).into()
-            }
-        }
+    let successors = |node: &Node| -> Successors { node.successors(volcano, &distances) };
 
-        successors
-    };
-    let success = |&node: &Node| node == Node::END;
+    let success = |&node: &Node| node.is_end();
 
     let (best_path, cost) =
         pathfinding::directed::dijkstra::dijkstra(&start, successors, success).unwrap();
+
+    let cost_with_no_pressure = u64::from(u32::MAX) * u64::from(minutes);
+    let expected_flow = cost_with_no_pressure - cost;
+    debugln!("Expected total flow: {expected_flow}");
 
     println!();
     println!("=== Best Path ===");
@@ -317,38 +313,57 @@ fn get_max_pressure_released(
 }
 
 fn print_detailed_path_and_get_flow(volcano: &Volcano, path: &[Node]) -> u32 {
-    let mut total_flow = 0;
-    for &node in path {
-        let minute = node.minutes_remaining;
+    let name = |valve| {
+        if let Some(valve) = valve {
+            volcano.valve(valve).unwrap().name
+        } else {
+            ValveName('(', ')')
+        }
+    };
 
-        let name = |valve| {
-            if let Some(valve) = valve {
-                volcano.valve(valve).unwrap().name
-            } else {
-                ValveName('(', ')')
-            }
-        };
-        let my_name = name(node.my_valve);
-        let elephant_name = name(node.elephant_valve);
+    let mut total_flow = 0;
+    let mut prev_node = path[0];
+
+    for &node in path {
+        let minutes = node.minutes_remaining;
+
+        let my_name = name(Some(node.valve));
+        // let elephant_name = name(node.elephant_valve);
 
         let open_valves: Vec<String> = node
             .open_valves()
             .map(|id| volcano.valve(id).unwrap().name.to_string())
             .collect();
 
-        let additional_flow = if node.minutes_remaining != 0 {
-            node.flow_rate(volcano)
-        } else {
-            0
-        };
+        let additional_flow =
+            (prev_node.minutes_remaining - minutes) * prev_node.flow_rate(volcano);
 
         println!(
-            "t={minute:>2}, f={total_flow:>4}, v0={my_name}, v1={elephant_name}, \
+            "t={minutes:>2}, f={total_flow:>4}, v0={my_name}, \
             {open_valves:?} -> +{additional_flow}"
         );
 
         total_flow += additional_flow;
+        prev_node = node;
     }
+
+    let mut total_flow = 0;
+
+    for (&node_a, &node_b) in path.iter().tuple_windows() {
+        let delta_minutes = node_a.minutes_remaining - node_b.minutes_remaining;
+        let flow_rate = node_a.flow_rate(volcano);
+        total_flow += delta_minutes * flow_rate;
+
+        println!(
+            "{}",
+            formatting::EdgePrinter {
+                a: node_a,
+                b: node_b,
+                volcano,
+            }
+        );
+    }
+
     total_flow
 }
 
@@ -464,7 +479,7 @@ mod tests {
 mod formatting {
     use super::*;
 
-    use std::fmt::{Display, Formatter, Result};
+    use std::fmt::{Debug, Display, Formatter, Result};
 
     impl Display for ValveName {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result {
@@ -475,6 +490,72 @@ mod formatting {
     impl Display for ValveId {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result {
             write!(f, "{}", self.index())
+        }
+    }
+
+    impl Debug for Node {
+        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+            f.debug_struct("Node")
+                .field("t", &self.minutes_remaining)
+                .field("v", &self.valve)
+                .field("open", &self.open_valves().map(|id| id.raw()).collect_vec())
+                .finish()
+        }
+    }
+
+    pub(super) struct EdgePrinter<'a> {
+        pub a: Node,
+        pub b: Node,
+        pub volcano: &'a Volcano,
+    }
+
+    impl Display for EdgePrinter<'_> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+            let name = |id| self.volcano.valve(id).unwrap().name;
+
+            let a_name = name(self.a.valve);
+            let b_name = name(self.b.valve);
+
+            let current_minute = self.a.minutes_remaining;
+            let delta_minutes = self.a.minutes_remaining - self.b.minutes_remaining;
+            let flow_rate = self.a.flow_rate(self.volcano);
+            let additional_flow = delta_minutes * flow_rate;
+
+            let is_last = self.b.minutes_remaining == 0;
+
+            writeln!(f, "at t={current_minute:>2}:")?;
+
+            if is_last {
+                writeln!(
+                    f,
+                    "    Wait {delta_minutes} minutes at valve {a_name} until time runs out."
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "    Travel {delta_minutes} minutes from valve {a_name} to {b_name} and open it."
+                )?;
+            }
+
+            if self.a.open_valves().count() == 0 {
+                write!(f, "    No valves are open, no pressure is released.")?;
+            } else {
+                write!(f, "    Valves [")?;
+                let mut first = true;
+                for id in self.a.open_valves() {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", name(id))?;
+                    first = false
+                }
+                write!(
+                    f,
+                    "] release {flow_rate} pressure per min, raising the total by {additional_flow}."
+                )?;
+            }
+
+            Ok(())
         }
     }
 }

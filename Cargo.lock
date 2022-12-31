@@ -14,6 +14,7 @@ dependencies = [
  "itertools",
  "maplit",
  "num-modular",
+ "num-traits",
  "pathfinding",
  "pico-args",
  "prettytable",
